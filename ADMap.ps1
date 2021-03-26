@@ -218,7 +218,7 @@ Function Get-PrivExchangeStatus {
     $objectSid = $(Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter "(samAccountName=$groupId)" -Properties objectsid).objectsid
     $groupSid = (New-Object Security.Principal.SecurityIdentifier($objectSid, 0)).Value
     Write-Verbose "SID of the group 'Exchange Windows Permissions': $groupSid"
-    if ($sid -and (Get-LdapObjectAcl -ADSpath $adsPath -Credential $Credential -Filter "(DistinguishedName=$rootDN)" | ? { ($_.SecurityIdentifier -imatch "$groupSid") -and ($_.ActiveDirectoryRights -imatch 'WriteDacl') -and -not ($_.AceFlags -imatch 'InheritOnly') })) {
+    if ($groupSid -and (Get-LdapObjectAcl -ADSpath $adsPath -Credential $Credential -Filter "(DistinguishedName=$rootDN)" | ? { ($_.SecurityIdentifier -imatch "$groupSid") -and ($_.ActiveDirectoryRights -imatch 'WriteDacl') -and -not ($_.AceFlags -imatch 'InheritOnly') })) {
         $privExchangeAcl = $true
     }
     Write-Output $privExchangeAcl
