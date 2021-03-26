@@ -462,7 +462,7 @@ Function Local:Get-LdapObjectAcl {
 
         [ValidateNotNullOrEmpty()]
         [String]
-        $Filter = '(objectClass=*)',
+        $Filter = '(objectClass=domain)',
 
         [ValidateRange(1,10000)] 
         [Int]
@@ -487,6 +487,7 @@ Function Local:Get-LdapObjectAcl {
     $searcher.filter = $Filter
     $propertiesToLoad = 'objectsid', 'ntsecuritydescriptor', 'distinguishedname'
     $searcher.PropertiesToLoad.AddRange($propertiesToLoad) | Out-Null
+    $searcher.SecurityMasks = [DirectoryServices.SecurityMasks]::Dacl
     try {
         $results = $searcher.FindAll()
         $results | Where-Object {$_} | ForEach-Object {
