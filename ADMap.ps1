@@ -12,13 +12,13 @@ Function Get-LdapPassword {
     Specifies the domain controller to query.
 
 .PARAMETER Credential
-    Specify the domain account to use.
+    Specifies the domain account to use.
 
 .PARAMETER Attributes
-    Specify specific attributes to search through.
+    Specifies specific attributes to search through.
 
 .PARAMETER Keywords
-    Specify specific keywords to search for.
+    Specifies specific keywords to search for.
 
 .EXAMPLE
     PS C:\> Get-LdapPassword -Server ADATUM.CORP -Credential ADATUM\testuser
@@ -190,7 +190,7 @@ Function Get-PrivExchangeStatus {
     Specifies the domain controller to query.
 
 .PARAMETER Credential
-    Specify the domain account to use.
+    Specifies the domain account to use.
 
 .EXAMPLE
     PS C:\> Get-PrivExchangeStatus -Server ADATUM.CORP -Credential ADATUM\testuser
@@ -215,7 +215,7 @@ Function Get-PrivExchangeStatus {
 
     $privExchangeAcl = $false
     $groupId = 'Exchange Windows Permissions'
-    $objectSid = $(Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter "(samAccountName=$groupId)" -Properties objectsid).objectsid
+    $objectSid = (Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter "(samAccountName=$groupId)" -Properties objectsid).objectsid
     $groupSid = (New-Object Security.Principal.SecurityIdentifier($objectSid, 0)).Value
     Write-Verbose "SID of the group 'Exchange Windows Permissions': $groupSid"
     if ($groupSid -and (Get-LdapObjectAcl -ADSpath $adsPath -Credential $Credential -Filter "(DistinguishedName=$rootDN)" | ? { ($_.SecurityIdentifier -imatch "$groupSid") -and ($_.ActiveDirectoryRights -imatch 'WriteDacl') -and -not ($_.AceFlags -imatch 'InheritOnly') })) {
@@ -238,7 +238,7 @@ Function Get-ExchangeVersion {
     Specifies the domain controller to query.
 
 .PARAMETER Credential
-    Specify the domain account to use.
+    Specifies the domain account to use.
 
 .EXAMPLE
     PS C:\> Get-ExchangeVersion -Server ADATUM.CORP -Credential ADATUM\testuser
@@ -340,7 +340,7 @@ Function Get-LegacyComputer {
     Specifies the domain controller to query.
 
 .PARAMETER Credential
-    Specify the domain account to use.
+    Specifies the domain account to use.
 
 .EXAMPLE
     PS C:\> Get-LegacyComputer -Server ADATUM.CORP -Credential ADATUM\testuser
@@ -381,6 +381,74 @@ Function Get-LegacyComputer {
                 LastLogon = ([datetime]::FromFileTime(($_.LastLogon)))
             }
         )
+    }
+}
+
+Function Get-DnsRecord {
+<#
+.SYNOPSIS
+    Enumerate DNS records from Active Directory for a given zone.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-DnsRecord queries domain controller via LDAP protocol for DNS records.
+    It is a slightly modified version of PowerView's Get-DomainDNSRecord by @harmj0y.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.PARAMETER ZoneName
+    Specifies the DNS zone to query for records, defaults to Active Directory domain.
+
+.EXAMPLE
+    PS C:\> Get-DnsRecord -Server DC.ADATUM.CORP -Credential ADATUM\testuser
+#>
+
+    [CmdletBinding()]
+    Param(
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty,
+
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $ZoneName
+    )
+
+    $searchString = "LDAP://$Server/RootDSE"
+    $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+    $rootDN = $rootDSE.rootDomainNamingContext[0]
+    if (-not $PSBoundParameters['ZoneName']) {
+        $ZoneName = $rootDN -replace 'DC=' -replace ',', '.'
+    }
+    $adsPath = "LDAP://$Server/DC=$($ZoneName),CN=MicrosoftDNS,DC=DomainDnsZones,$rootDN"
+
+    $filter = '(objectClass=dnsNode)'
+    $properties = 'name', 'distinguishedname', 'dnsrecord', 'whencreated', 'whenchanged'
+    Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
+        $obj = $_
+        if ($obj.dnsrecord -is [DirectoryServices.ResultPropertyValueCollection]) {
+            $record = ConvertFrom-DNSRecord -DNSRecord $obj.dnsrecord[0]
+        }
+        else {
+            $record = ConvertFrom-DNSRecord -DNSRecord $obj.dnsrecord
+        }
+        if ($record) {
+            $record.PSObject.Properties | ForEach-Object {
+                $obj | Add-Member NoteProperty $_.Name $_.Value
+            }
+        }
+        $obj | Add-Member NoteProperty 'ZoneName' $ZoneName
+        Write-Output $obj | Select 'ZoneName','RecordType','Name','Data','Timestamp','WhenCreated','WhenChanged'
     }
 }
 
@@ -432,7 +500,7 @@ Function Local:Get-LdapObject {
             $objectProperties = @{}
             $p = $_.Properties
             $p.PropertyNames | ForEach-Object {
-                if (($_ -ne 'adspath') -And ($p[$_].count -eq 1)) {
+                if (($_ -ne 'adspath') -and ($p[$_].count -eq 1)) {
                     $objectProperties[$_] = $p[$_][0]
                 }
                 elseif ($_ -ne 'adspath') {
@@ -508,6 +576,113 @@ Function Local:Get-LdapObjectAcl {
     }
     catch {
         Write-Error $_ -ErrorAction Stop
+    }
+}
+
+Function Local:ConvertFrom-DNSRecord {
+    Param(
+        [Parameter(Mandatory = $True)]
+        [Byte[]]
+        $DNSRecord
+    )
+
+    BEGIN {
+        Function Get-Name([Byte[]] $Raw) {
+            [Int] $Length = $Raw[0]
+            [Int] $Segments = $Raw[1]
+            [Int] $Index =  2
+            [String] $Name  = ''
+            while ($Segments-- -gt 0) {
+                [Int]$segmentLength = $Raw[$Index++]
+                while ($segmentLength-- -gt 0) {
+                    $Name += [Char]$Raw[$Index++]
+                }
+                $Name += "."
+            }
+            $Name
+        }
+    }
+
+    PROCESS {
+        $rDataType = [BitConverter]::ToUInt16($DNSRecord, 2)
+        $updatedAtSerial = [BitConverter]::ToUInt32($DNSRecord, 8)
+
+        $ttlRaw = $DNSRecord[12..15]
+        $null = [array]::Reverse($ttlRaw)
+        $ttl = [BitConverter]::ToUInt32($ttlRaw, 0)
+
+        $age = [BitConverter]::ToUInt32($DNSRecord, 20)
+        if ($Age -ne 0) {
+            $timestamp = ((Get-Date -Year 1601 -Month 1 -Day 1 -Hour 0 -Minute 0 -Second 0).AddHours($age)).ToString()
+        }
+        else {
+            $timestamp = '[static]'
+        }
+
+        $dnsRecordObject = New-Object PSObject
+
+        switch ($rDataType) {
+            1 {
+                $IP = "{0}.{1}.{2}.{3}" -f $DNSRecord[24], $DNSRecord[25], $DNSRecord[26], $DNSRecord[27]
+                $data = $IP
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'A'
+            }
+            2 {
+                $NSName = Get-Name $DNSRecord[24..$DNSRecord.length]
+                $data = $NSName
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'NS'
+            }
+            5 {
+                $Alias = Get-Name $DNSRecord[24..$DNSRecord.length]
+                $data = $Alias
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'CNAME'
+            }
+            6 {
+                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'SOA'
+            }
+            12 {
+                $ptr = Get-Name $DNSRecord[24..$DNSRecord.length]
+                $data = $ptr
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'PTR'
+            }
+            13 {
+                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'HINFO'
+            }
+            15 {
+                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'MX'
+            }
+            16 {
+                [string] $txt  = ''
+                [int] $segmentLength = $DNSRecord[24]
+                $Index = 25
+                while ($segmentLength-- -gt 0) {
+                    $txt += [char]$DNSRecord[$index++]
+                }
+                $data = $txt
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'TXT'
+            }
+            28 {
+                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'AAAA'
+            }
+            33 {
+                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'SRV'
+            }
+            default {
+                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'UNKNOWN'
+            }
+        }
+        $dnsRecordObject | Add-Member Noteproperty 'UpdatedAtSerial' $updatedAtSerial
+        $dnsRecordObject | Add-Member Noteproperty 'TTL' $ttl
+        $dnsRecordObject | Add-Member Noteproperty 'Age' $age
+        $dnsRecordObject | Add-Member Noteproperty 'Timestamp' $timestamp
+        $dnsRecordObject | Add-Member Noteproperty 'Data' $data
+        Write-Output $dnsRecordObject
     }
 }
 
