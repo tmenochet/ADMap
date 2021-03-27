@@ -47,132 +47,226 @@ Function Get-LdapPassword {
         $Keywords = @("cred", "pass", "pw")
     )
 
-    $searchString = "LDAP://$Server/RootDSE"
-    $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-    $rootDN = $rootDSE.rootDomainNamingContext[0]
-    $adsPath = "LDAP://$Server/$rootDN"
-
-    # Searching for password in world-readable attributes
-    $filter = ''
-    foreach ($attribute in $Attributes) {
-        foreach ($keyword in $Keywords) {
-            $filter += "($attribute=*$keyword*)"
+    BEGIN {
+        Function Local:ReadSecureWString {
+            Param (
+                [byte[]] $Buffer,
+                [int] $StartIndex
+            )
+            $maxLength = $Buffer.Length - $StartIndex;
+            $result = New-Object SecureString
+            for ($i = $startIndex; $i -lt $buffer.Length; $i += [Text.UnicodeEncoding]::CharSize) {
+                $c = [BitConverter]::ToChar($buffer, $i)
+                if ($c -eq [Char]::MinValue) {
+                    return $result
+                }
+                $result.AppendChar($c)
+            }
         }
+
+        Function Local:ConvertFrom-ADManagedPasswordBlob {
+            Param (
+                [byte[]] $Blob
+            )
+            $stream = New-object IO.MemoryStream($Blob)
+            $reader = New-Object IO.BinaryReader($stream)
+            $version = $reader.ReadInt16()
+            $reserved = $reader.ReadInt16()
+            $length = $reader.ReadInt32()
+            $currentPasswordOffset = $reader.ReadInt16()
+            $secureCurrentPassword = ReadSecureWString -Buffer $blob -StartIndex $currentPasswordOffset
+            $previousPasswordOffset = $reader.ReadInt16()
+            [SecureString] $securePreviousPassword = $null
+            if($previousPasswordOffset > 0) {
+                $securePreviousPassword = ReadSecureWString -Buffer $blob -StartIndex $previousPasswordOffset
+            }
+            $queryPasswordIntervalOffset = $reader.ReadInt16()
+            $queryPasswordIntervalBinary = [BitConverter]::ToInt64($blob, $queryPasswordIntervalOffset)
+            $queryPasswordInterval = [TimeSpan]::FromTicks($queryPasswordIntervalBinary)
+            $unchangedPasswordIntervalOffset = $reader.ReadInt16()
+            $unchangedPasswordIntervalBinary = [BitConverter]::ToInt64($blob, $unchangedPasswordIntervalOffset)
+            $unchangedPasswordInterval = [TimeSpan]::FromTicks($unchangedPasswordIntervalBinary)
+            New-Object PSObject -Property @{
+                CurrentPassword = $secureCurrentPassword.ToUnicodeString()
+                PreviousPassword = $securePreviousPassword.ToUnicodeString()
+                QueryPasswordInterval = $queryPasswordInterval
+                UnchangedPasswordInterval = $unchangedPasswordInterval
+            }
+        }
+
+        Function Local:ConvertTo-NTHash {
+            Param (
+                [string] $Password
+            )
+            $ntHash = New-Object byte[] 16
+            $unicodePassword = New-Object Win32+UNICODE_STRING $Password
+            [Win32]::RtlCalculateNtOwfPassword([ref] $unicodePassword, $ntHash) | Out-Null
+            $unicodePassword.Dispose()
+            return (($ntHash | ForEach-Object ToString X2) -join '')
+        }
+
+        $searchString = "LDAP://$Server/RootDSE"
+        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+        $rootDN = $rootDSE.rootDomainNamingContext[0]
+        $adsPath = "LDAP://$Server/$rootDN"
     }
-    $filter = "(&(objectClass=user)(|$filter))"
-    Get-LdapObject -ADSpath $adsPath -Filter $filter -Credential $Credential | ForEach-Object {
-        foreach ($attribute in $attributes) {
-            if ($_.$attribute) {
+
+    PROCESS {
+        # Searching for password in world-readable attributes
+        $filter = ''
+        foreach ($attribute in $Attributes) {
+            foreach ($keyword in $Keywords) {
+                $filter += "($attribute=*$keyword*)"
+            }
+        }
+        $filter = "(&(objectClass=user)(|$filter))"
+        Get-LdapObject -ADSpath $adsPath -Filter $filter -Credential $Credential | ForEach-Object {
+            foreach ($attribute in $attributes) {
+                if ($_.$attribute) {
+                    [pscustomobject] @{
+                        SamAccountName = $_.sAMAccountName
+                        Attribute = $attribute
+                        Value = $_.$attribute
+                    }
+                }
+            }
+        }
+
+        # Searching for encoded password attributes
+        # Reference: https://www.blackhillsinfosec.com/domain-goodness-learned-love-ad-explorer/
+        $filter = ''
+        $attributes = @("UnixUserPassword", "UserPassword", "msSFU30Password", "unicodePwd")
+        foreach ($attribute in $Attributes) {
+            $filter += "($attribute=*)"
+        }
+        $filter = "(&(objectClass=user)(|$filter))"
+        Get-LdapObject -ADSpath $adsPath -Filter $filter -Credential $Credential | ForEach-Object {
+            foreach ($attribute in $attributes) {
+                if ($_.$attribute) {
+                    [pscustomobject] @{
+                        SamAccountName = $_.sAMAccountName
+                        Attribute = $attribute
+                        Value = [Text.Encoding]::ASCII.GetString($_.$attribute)
+                    }
+                }
+            }
+        }
+
+        # Searching for LAPS passwords
+        # Reference: https://adsecurity.org/?p=1790
+        $filter = "(&(objectCategory=Computer)(ms-MCS-AdmPwd=*))"
+        Get-LdapObject -ADSpath $adsPath -Filter $filter -Credential $Credential | ForEach-Object {
+            if ($_.'ms-MCS-AdmPwd') {
                 [pscustomobject] @{
                     SamAccountName = $_.sAMAccountName
-                    Attribute = $attribute
-                    Value = $_.$attribute
+                    Attribute = 'ms-MCS-AdmPwd'
+                    Value = $_.'ms-MCS-AdmPwd'
+                }
+            }
+        }
+
+        # Searching for GMSA passwords
+        # Reference: https://www.dsinternals.com/en/retrieving-cleartext-gmsa-passwords-from-active-directory/
+        $filter = "(&(objectClass=msDS-GroupManagedServiceAccount)(msDS-ManagedPasswordId=*))"
+        Get-LdapObject -ADSpath $adsPath -Filter $filter -Credential $Credential | ForEach-Object {
+            if ($_.'msDS-ManagedPassword') {
+                [pscustomobject] @{
+                    SamAccountName = $_.sAMAccountName
+                    Attribute = 'msDS-ManagedPassword'
+                    Value = ConvertTo-NTHash -Password (ConvertFrom-ADManagedPasswordBlob -Blob $_.'msDS-ManagedPassword').CurrentPassword
                 }
             }
         }
     }
+}
 
-    # Searching for encoded password attributes
-    # Reference: https://www.blackhillsinfosec.com/domain-goodness-learned-love-ad-explorer/
-    $filter = ''
-    $attributes = @("UnixUserPassword", "UserPassword", "msSFU30Password", "unicodePwd")
-    foreach ($attribute in $Attributes) {
-        $filter += "($attribute=*)"
+Function Get-PasswordPolicy {
+<#
+.SYNOPSIS
+    Get password policies defined in Active Directory.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-LdapPassword queries domain controller via LDAP protocol for default password policy as well as fine-grained password policies.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.EXAMPLE
+    PS C:\> Get-PasswordPolicy -Server ADATUM.CORP -Credential ADATUM\testuser
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
+    )
+
+    BEGIN {
+        $searchString = "LDAP://$Server/RootDSE"
+        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+        $rootDN = $rootDSE.rootDomainNamingContext[0]
+        $adsPath = "LDAP://$Server/$rootDN"
     }
-    $filter = "(&(objectClass=user)(|$filter))"
-    Get-LdapObject -ADSpath $adsPath -Filter $filter -Credential $Credential | ForEach-Object {
-        foreach ($attribute in $attributes) {
-            if ($_.$attribute) {
-                [pscustomobject] @{
-                    SamAccountName = $_.sAMAccountName
-                    Attribute = $attribute
-                    Value = [Text.Encoding]::ASCII.GetString($_.$attribute)
-                }
+
+    PROCESS {
+        # Enumerate domain password policy
+        $filter = '(objectClass=domain)'
+        $properties = 'distinguishedName','displayname','name','minPwdLength','minPwdAge','maxPwdAge','pwdHistoryLength','pwdProperties','lockoutDuration','lockoutThreshold','lockOutObservationWindow'
+        Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties -SearchScope 'Base' | ForEach-Object {
+            $complexityEnabled = $false
+            if ($_.pwdProperties -band 1) {
+                $complexityEnabled = $true
             }
-        }
-    }
-
-    # Searching for LAPS passwords
-    # Reference: https://adsecurity.org/?p=1790
-    $filter = "(&(objectCategory=Computer)(ms-MCS-AdmPwd=*))"
-    Get-LdapObject -ADSpath $adsPath -Filter $filter -Credential $Credential | ForEach-Object {
-        if ($_.'ms-MCS-AdmPwd') {
-            [pscustomobject] @{
-                SamAccountName = $_.sAMAccountName
-                Attribute = 'ms-MCS-AdmPwd'
-                Value = $_.'ms-MCS-AdmPwd'
+            $reversibleEncryptionEnabled = $false
+            if ($_.pwdProperties -band 16) {
+                $reversibleEncryptionEnabled = $true
             }
+            Write-Output ([pscustomobject] @{
+                DisplayName = 'Default Domain Policy'
+                DistinguishedName = $_.distinguishedName
+                AppliesTo = $_.name
+                MinPasswordLength = $_.minPwdLength
+                MinPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($_.minPwdAge)).ToString()
+                MaxPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($_.maxPwdAge)).ToString()
+                PasswordHistoryCount = $_.pwdHistoryLength
+                ComplexityEnabled = $complexityEnabled
+                ReversibleEncryptionEnabled = $reversibleEncryptionEnabled
+                LockoutThreshold = $_.lockoutThreshold
+                LockoutDuration = [TimeSpan]::FromTicks([Math]::ABS($_.lockoutDuration)).ToString()
+                LockOutObservationWindow = [TimeSpan]::FromTicks([Math]::ABS($_.lockOutObservationWindow)).ToString()
+            })
         }
-    }
 
-    # Searching for GMSA passwords
-    # Reference: https://www.dsinternals.com/en/retrieving-cleartext-gmsa-passwords-from-active-directory/
-    $filter = "(&(objectClass=msDS-GroupManagedServiceAccount)(msDS-ManagedPasswordId=*))"
-    Get-LdapObject -ADSpath $adsPath -Filter $filter -Credential $Credential | ForEach-Object {
-        if ($_.'msDS-ManagedPassword') {
-            [pscustomobject] @{
-                SamAccountName = $_.sAMAccountName
-                Attribute = 'msDS-ManagedPassword'
-                Value = ConvertTo-NTHash -Password (ConvertFrom-ADManagedPasswordBlob -Blob $_.'msDS-ManagedPassword').CurrentPassword
-            }
+        # Enumerate fine-grained password policies
+        $filter = '(objectClass=msDS-PasswordSettings)'
+        $properties = 'distinguishedName','displayname','AppliesToDN','msds-lockoutthreshold','msds-psoappliesto','msds-minimumpasswordlength','msds-passwordhistorylength','msds-lockoutobservationwindow','msds-lockoutduration','msds-minimumpasswordage','msds-maximumpasswordage','msds-passwordsettingsprecedence','msds-passwordcomplexityenabled','msds-passwordreversibleencryptionenabled'
+        Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
+            Write-Output ([pscustomobject] @{
+                DisplayName = $_.displayname
+                DistinguishedName = $_.distinguishedName
+                AppliesTo = $_.'msds-psoappliesto'
+                MinPasswordLength = $_.'msds-minimumpasswordlength'
+                MinPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-minimumpasswordage')).ToString()
+                MaxPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-maximumpasswordage')).ToString()
+                PasswordHistoryCount = $_.'msds-passwordhistorylength'
+                ComplexityEnabled = $_.'msds-passwordcomplexityenabled'
+                ReversibleEncryptionEnabled = $_.'msds-passwordreversibleencryptionenabled'
+                LockoutThreshold = $_.'msds-lockoutthreshold'
+                LockoutDuration = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-lockoutduration')).ToString()
+                LockOutObservationWindow = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-lockoutobservationwindow')).ToString()
+            })
         }
-    }
-
-    Function Local:ReadSecureWString {
-        Param (
-            [byte[]] $Buffer,
-            [int] $StartIndex
-        )
-        $maxLength = $Buffer.Length - $StartIndex;
-        $result = New-Object SecureString
-        for ($i = $startIndex; $i -lt $buffer.Length; $i += [Text.UnicodeEncoding]::CharSize) {
-            $c = [BitConverter]::ToChar($buffer, $i)
-            if ($c -eq [Char]::MinValue) {
-                return $result
-            }
-            $result.AppendChar($c)
-        }
-    }
-
-    Function Local:ConvertFrom-ADManagedPasswordBlob {
-        Param (
-            [byte[]] $Blob
-        )
-        $stream = New-object IO.MemoryStream($Blob)
-        $reader = New-Object IO.BinaryReader($stream)
-        $version = $reader.ReadInt16()
-        $reserved = $reader.ReadInt16()
-        $length = $reader.ReadInt32()
-        $currentPasswordOffset = $reader.ReadInt16()
-        $secureCurrentPassword = ReadSecureWString -Buffer $blob -StartIndex $currentPasswordOffset
-        $previousPasswordOffset = $reader.ReadInt16()
-        [SecureString] $securePreviousPassword = $null
-        if($previousPasswordOffset > 0) {
-            $securePreviousPassword = ReadSecureWString -Buffer $blob -StartIndex $previousPasswordOffset
-        }
-        $queryPasswordIntervalOffset = $reader.ReadInt16()
-        $queryPasswordIntervalBinary = [BitConverter]::ToInt64($blob, $queryPasswordIntervalOffset)
-        $queryPasswordInterval = [TimeSpan]::FromTicks($queryPasswordIntervalBinary)
-        $unchangedPasswordIntervalOffset = $reader.ReadInt16()
-        $unchangedPasswordIntervalBinary = [BitConverter]::ToInt64($blob, $unchangedPasswordIntervalOffset)
-        $unchangedPasswordInterval = [TimeSpan]::FromTicks($unchangedPasswordIntervalBinary)
-        New-Object PSObject -Property @{
-            CurrentPassword = $secureCurrentPassword.ToUnicodeString()
-            PreviousPassword = $securePreviousPassword.ToUnicodeString()
-            QueryPasswordInterval = $queryPasswordInterval
-            UnchangedPasswordInterval = $unchangedPasswordInterval
-        }
-    }
-
-    Function Local:ConvertTo-NTHash {
-        Param (
-            [string] $Password
-        )
-        $ntHash = New-Object byte[] 16
-        $unicodePassword = New-Object Win32+UNICODE_STRING $Password
-        [Win32]::RtlCalculateNtOwfPassword([ref] $unicodePassword, $ntHash) | Out-Null
-        $unicodePassword.Dispose()
-        return (($ntHash | ForEach-Object ToString X2) -join '')
     }
 }
 
@@ -208,20 +302,24 @@ Function Get-PrivExchangeStatus {
         $Credential = [Management.Automation.PSCredential]::Empty
     )
 
-    $searchString = "LDAP://$Server/RootDSE"
-    $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-    $rootDN = $rootDSE.rootDomainNamingContext[0]
-    $adsPath = "LDAP://$Server/$rootDN"
-
-    $privExchangeAcl = $false
-    $groupId = 'Exchange Windows Permissions'
-    $objectSid = (Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter "(samAccountName=$groupId)" -Properties objectsid).objectsid
-    $groupSid = (New-Object Security.Principal.SecurityIdentifier($objectSid, 0)).Value
-    Write-Verbose "SID of the group 'Exchange Windows Permissions': $groupSid"
-    if ($groupSid -and (Get-LdapObjectAcl -ADSpath $adsPath -Credential $Credential -Filter "(DistinguishedName=$rootDN)" | ? { ($_.SecurityIdentifier -imatch "$groupSid") -and ($_.ActiveDirectoryRights -imatch 'WriteDacl') -and -not ($_.AceFlags -imatch 'InheritOnly') })) {
-        $privExchangeAcl = $true
+    BEGIN {
+        $searchString = "LDAP://$Server/RootDSE"
+        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+        $rootDN = $rootDSE.rootDomainNamingContext[0]
+        $adsPath = "LDAP://$Server/$rootDN"
     }
-    Write-Output $privExchangeAcl
+
+    PROCESS {
+        $privExchangeAcl = $false
+        $groupId = 'Exchange Windows Permissions'
+        $objectSid = (Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter "(samAccountName=$groupId)" -Properties objectsid).objectsid
+        $groupSid = (New-Object Security.Principal.SecurityIdentifier($objectSid, 0)).Value
+        Write-Verbose "SID of the group 'Exchange Windows Permissions': $groupSid"
+        if ($groupSid -and (Get-LdapObjectAcl -ADSpath $adsPath -Credential $Credential -Filter "(DistinguishedName=$rootDN)" | ? { ($_.SecurityIdentifier -imatch "$groupSid") -and ($_.ActiveDirectoryRights -imatch 'WriteDacl') -and -not ($_.AceFlags -imatch 'InheritOnly') })) {
+            $privExchangeAcl = $true
+        }
+        Write-Output $privExchangeAcl
+    }
 }
 
 Function Get-ExchangeVersion {
@@ -256,73 +354,77 @@ Function Get-ExchangeVersion {
         $Credential = [Management.Automation.PSCredential]::Empty
     )
 
-    Function Local:ConvertTo-ExchangeVersion($Version) {
-        $versionSizeInBits = 32
-        $binaryVersion = [Convert]::ToString([int32]$Version,2)
-        for ($i = $($binaryVersion.Length); $i -lt $versionSizeInBits; $i++){
-            $binaryVersion = '0' + $binaryVersion
+    BEGIN {
+        Function Local:ConvertTo-ExchangeVersion($Version) {
+            $versionSizeInBits = 32
+            $binaryVersion = [Convert]::ToString([int32]$Version,2)
+            for ($i = $($binaryVersion.Length); $i -lt $versionSizeInBits; $i++){
+                $binaryVersion = '0' + $binaryVersion
+            }
+            New-Object PSObject -Property @{
+                LegacyVersionStructure = [Convert]::ToInt16($binaryVersion.Substring(0,4),2)
+                MajorVersion = [Convert]::ToInt16($binaryVersion.Substring(4,6),2)
+                MinorVersion = [Convert]::ToInt16($binaryVersion.Substring(10,6),2)
+                Flag = [Convert]::ToInt16($binaryVersion.Substring(16,1),2)
+                Build = [Convert]::ToInt16($binaryVersion.Substring(17,15),2)
+            }
         }
-        New-Object PSObject -Property @{
-            LegacyVersionStructure = [Convert]::ToInt16($binaryVersion.Substring(0,4),2)
-            MajorVersion = [Convert]::ToInt16($binaryVersion.Substring(4,6),2)
-            MinorVersion = [Convert]::ToInt16($binaryVersion.Substring(10,6),2)
-            Flag = [Convert]::ToInt16($binaryVersion.Substring(16,1),2)
-            Build = [Convert]::ToInt16($binaryVersion.Substring(17,15),2)
-        }
+
+        $searchString = "LDAP://$Server/RootDSE"
+        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+        $rootDN = $rootDSE.rootDomainNamingContext[0]
+        $adsPath = "LDAP://$Server/$rootDN"
     }
 
-    $searchString = "LDAP://$Server/RootDSE"
-    $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-    $rootDN = $rootDSE.rootDomainNamingContext[0]
-    $adsPath = "LDAP://$Server/$rootDN"
-
-    $roleDictionary = @{2  = "MB"; 4  = "CAS"; 16 = "UM"; 32 = "HT"; 64 = "ET"}
-    $properties = 'sAMAccountName', 'msExchCurrentServerRoles', 'networkAddress', 'versionNumber'
-    $filter = "(|(objectClass=msExchExchangeServer)(objectClass=msExchClientAccessArray))"
-    $configurationNamingContext = $rootDSE.configurationNamingContext[0]
-    $exchangeServers = Get-LdapObject -ADSpath "LDAP://$Server/$configurationNamingContext" -Credential $Credential -Filter $filter -Properties $properties
-    foreach ($exchServer in $exchangeServers) {
-        $privExchange = $false
-        $CVE20200688  = $false
-        $proxyLogon = $false
-        $exchVersion = ConvertTo-ExchangeVersion $exchServer.versionNumber
-        switch ($exchVersion.MajorVersion) {
-            "15" {
-                switch ($exchVersion.MinorVersion) {
-                    "0" {
-                        if ([int]$exchVersion.Build -lt 1473) { $privExchange = $true }
-                        if ([int]$exchVersion.Build -lt 1497) { $CVE20200688 = $true; $proxyLogon = $true }
+    PROCESS {
+        $roleDictionary = @{2  = "MB"; 4  = "CAS"; 16 = "UM"; 32 = "HT"; 64 = "ET"}
+        $properties = 'sAMAccountName', 'msExchCurrentServerRoles', 'networkAddress', 'versionNumber'
+        $filter = "(|(objectClass=msExchExchangeServer)(objectClass=msExchClientAccessArray))"
+        $configurationNamingContext = $rootDSE.configurationNamingContext[0]
+        $exchangeServers = Get-LdapObject -ADSpath "LDAP://$Server/$configurationNamingContext" -Credential $Credential -Filter $filter -Properties $properties
+        foreach ($exchServer in $exchangeServers) {
+            $privExchange = $false
+            $CVE20200688  = $false
+            $proxyLogon = $false
+            $exchVersion = ConvertTo-ExchangeVersion $exchServer.versionNumber
+            switch ($exchVersion.MajorVersion) {
+                "15" {
+                    switch ($exchVersion.MinorVersion) {
+                        "0" {
+                            if ([int]$exchVersion.Build -lt 1473) { $privExchange = $true }
+                            if ([int]$exchVersion.Build -lt 1497) { $CVE20200688 = $true; $proxyLogon = $true }
+                        }
+                        "1" {
+                            if ([int]$exchVersion.Build -lt 1713) { $privExchange = $true }
+                            if ([int]$exchVersion.Build -lt 1847) { $CVE20200688 = $true }
+                            if ([int]$exchVersion.Build -lt 2106) { $proxyLogon = $true }
+                        }
+                        "2" {
+                            if ([int]$exchVersion.Build -lt 330) { $privExchange = $true }
+                            if ([int]$exchVersion.Build -lt 464) { $CVE20200688 = $true }
+                            if ([int]$exchVersion.Build -lt 721) { $proxyLogon = $true }
+                        }
                     }
-                    "1" {
-                        if ([int]$exchVersion.Build -lt 1713) { $privExchange = $true }
-                        if ([int]$exchVersion.Build -lt 1847) { $CVE20200688 = $true }
-                        if ([int]$exchVersion.Build -lt 2106) { $proxyLogon = $true }
-                    }
-                    "2" {
-                        if ([int]$exchVersion.Build -lt 330) { $privExchange = $true }
-                        if ([int]$exchVersion.Build -lt 464) { $CVE20200688 = $true }
-                        if ([int]$exchVersion.Build -lt 721) { $proxyLogon = $true }
+                }
+                "14" {
+                    switch ($exchVersion.MinorVersion) {
+                        "3" {
+                            if ([int]$exchVersion.Build -lt 442) { $privExchange = $true }
+                            if ([int]$exchVersion.Build -lt 496) { $CVE20200688 = $true; $proxyLogon = $true }
+                        }
                     }
                 }
             }
-            "14" {
-                switch ($exchVersion.MinorVersion) {
-                    "3" {
-                        if ([int]$exchVersion.Build -lt 442) { $privExchange = $true }
-                        if ([int]$exchVersion.Build -lt 496) { $CVE20200688 = $true; $proxyLogon = $true }
-                    }
-                }
+            $obj = [pscustomobject] @{
+                Fqdn            = ($exchServer.networkAddress | Where-Object -FilterScript {$_ -like "ncacn_ip_tcp*"}).Split(":")[1]
+                Roles           = [string] ($roleDictionary.Keys | ?{$_ -band $exchServer.msExchCurrentServerRoles} | %{$roleDictionary.Get_Item($_)})
+                Version         = "$($exchVersion.MajorVersion).$($exchVersion.MinorVersion).$($exchVersion.Build)"
+                PrivExchange    = $privExchange
+                'CVE-2020-0688' = $CVE20200688
+                ProxyLogon      = $proxyLogon
             }
+            Write-Output $obj
         }
-        $obj = [pscustomobject] @{
-            Fqdn            = ($exchServer.networkAddress | Where-Object -FilterScript {$_ -like "ncacn_ip_tcp*"}).Split(":")[1]
-            Roles           = [string] ($roleDictionary.Keys | ?{$_ -band $exchServer.msExchCurrentServerRoles} | %{$roleDictionary.Get_Item($_)})
-            Version         = "$($exchVersion.MajorVersion).$($exchVersion.MinorVersion).$($exchVersion.Build)"
-            PrivExchange    = $privExchange
-            'CVE-2020-0688' = $CVE20200688
-            ProxyLogon      = $proxyLogon
-        }
-        Write-Output $obj
     }
 }
 
@@ -358,36 +460,40 @@ Function Get-LegacyComputer {
         $Credential = [Management.Automation.PSCredential]::Empty
     )
 
-    $searchString = "LDAP://$Server/RootDSE"
-    $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-    $rootDN = $rootDSE.rootDomainNamingContext[0]
-    $adsPath = "LDAP://$Server/$rootDN"
-
-    $legacyOS = '2000', '2003', '2008', 'ME', 'XP', 'Vista', 'Windows NT', 'Windows 7', 'Windows 8'
-    $filter = ''
-    foreach($os in $legacyOS) {
-        $filter += "(operatingsystem=*$os*)"
+    BEGIN {
+        $searchString = "LDAP://$Server/RootDSE"
+        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+        $rootDN = $rootDSE.rootDomainNamingContext[0]
+        $adsPath = "LDAP://$Server/$rootDN"
     }
-    $filter = "(&(samAccountType=805306369)(!userAccountControl:1.2.840.113556.1.4.803:=2)(|$filter))"
-    $properties = 'dnsHostname', 'samAccountName', 'operatingSystem', 'operatingSystemVersion', 'operatingSystemServicePack', 'LastLogon'
-    Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
-        Write-Output (
-            [pscustomobject] @{
-                sAMAccountName = $_.samAccountName
-                ComputerName = $_.dnsHostname
-                OperatingSystem = $_.operatingSystem
-                Version = $_.operatingSystemVersion
-                ServicePack = $_.operatingSystemServicePack
-                LastLogon = ([datetime]::FromFileTime(($_.LastLogon)))
-            }
-        )
+
+    PROCESS {
+        $legacyOS = '2000', '2003', '2008', 'ME', 'XP', 'Vista', 'Windows NT', 'Windows 7', 'Windows 8'
+        $filter = ''
+        foreach($os in $legacyOS) {
+            $filter += "(operatingsystem=*$os*)"
+        }
+        $filter = "(&(samAccountType=805306369)(!userAccountControl:1.2.840.113556.1.4.803:=2)(|$filter))"
+        $properties = 'dnsHostname', 'samAccountName', 'operatingSystem', 'operatingSystemVersion', 'operatingSystemServicePack', 'LastLogon'
+        Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
+            Write-Output (
+                [pscustomobject] @{
+                    sAMAccountName = $_.samAccountName
+                    ComputerName = $_.dnsHostname
+                    OperatingSystem = $_.operatingSystem
+                    Version = $_.operatingSystemVersion
+                    ServicePack = $_.operatingSystemServicePack
+                    LastLogon = ([datetime]::FromFileTime(($_.LastLogon)))
+                }
+            )
+        }
     }
 }
 
 Function Get-DnsRecord {
 <#
 .SYNOPSIS
-    Enumerate DNS records from Active Directory for a given zone.
+    Get Active Directory-Integrated DNS (ADIDNS) records for a given zone.
 
     Author: Timothee MENOCHET (@_tmenochet)
 
@@ -423,6 +529,103 @@ Function Get-DnsRecord {
         [String]
         $ZoneName
     )
+
+    Function Local:Get-Name ([Byte[]] $Raw) {
+        [Int] $Length = $Raw[0]
+        [Int] $Segments = $Raw[1]
+        [Int] $Index =  2
+        [String] $Name  = ''
+        while ($Segments-- -gt 0) {
+            [Int]$segmentLength = $Raw[$Index++]
+            while ($segmentLength-- -gt 0) {
+                $Name += [Char]$Raw[$Index++]
+            }
+            $Name += "."
+        }
+        $Name
+    }
+
+    Function Local:ConvertFrom-DNSRecord ([Byte[]]$DNSRecord) {
+        $rDataType = [BitConverter]::ToUInt16($DNSRecord, 2)
+        $updatedAtSerial = [BitConverter]::ToUInt32($DNSRecord, 8)
+
+        $ttlRaw = $DNSRecord[12..15]
+        $null = [array]::Reverse($ttlRaw)
+        $ttl = [BitConverter]::ToUInt32($ttlRaw, 0)
+
+        $age = [BitConverter]::ToUInt32($DNSRecord, 20)
+        if ($Age -ne 0) {
+            $timestamp = ((Get-Date -Year 1601 -Month 1 -Day 1 -Hour 0 -Minute 0 -Second 0).AddHours($age)).ToString()
+        }
+        else {
+            $timestamp = '[static]'
+        }
+
+        $dnsRecordObject = New-Object PSObject
+
+        switch ($rDataType) {
+            1 {
+                $IP = "{0}.{1}.{2}.{3}" -f $DNSRecord[24], $DNSRecord[25], $DNSRecord[26], $DNSRecord[27]
+                $data = $IP
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'A'
+            }
+            2 {
+                $NSName = Get-Name $DNSRecord[24..$DNSRecord.length]
+                $data = $NSName
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'NS'
+            }
+            5 {
+                $Alias = Get-Name $DNSRecord[24..$DNSRecord.length]
+                $data = $Alias
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'CNAME'
+            }
+            6 {
+                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'SOA'
+            }
+            12 {
+                $ptr = Get-Name $DNSRecord[24..$DNSRecord.length]
+                $data = $ptr
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'PTR'
+            }
+            13 {
+                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'HINFO'
+            }
+            15 {
+                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'MX'
+            }
+            16 {
+                [string] $txt  = ''
+                [int] $segmentLength = $DNSRecord[24]
+                $Index = 25
+                while ($segmentLength-- -gt 0) {
+                    $txt += [char]$DNSRecord[$index++]
+                }
+                $data = $txt
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'TXT'
+            }
+            28 {
+                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'AAAA'
+            }
+            33 {
+                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'SRV'
+            }
+            default {
+                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'UNKNOWN'
+            }
+        }
+        $dnsRecordObject | Add-Member Noteproperty 'UpdatedAtSerial' $updatedAtSerial
+        $dnsRecordObject | Add-Member Noteproperty 'TTL' $ttl
+        $dnsRecordObject | Add-Member Noteproperty 'Age' $age
+        $dnsRecordObject | Add-Member Noteproperty 'Timestamp' $timestamp
+        $dnsRecordObject | Add-Member Noteproperty 'Data' $data
+        Write-Output $dnsRecordObject
+    }
 
     $searchString = "LDAP://$Server/RootDSE"
     $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
@@ -576,113 +779,6 @@ Function Local:Get-LdapObjectAcl {
     }
     catch {
         Write-Error $_ -ErrorAction Stop
-    }
-}
-
-Function Local:ConvertFrom-DNSRecord {
-    Param(
-        [Parameter(Mandatory = $True)]
-        [Byte[]]
-        $DNSRecord
-    )
-
-    BEGIN {
-        Function Get-Name([Byte[]] $Raw) {
-            [Int] $Length = $Raw[0]
-            [Int] $Segments = $Raw[1]
-            [Int] $Index =  2
-            [String] $Name  = ''
-            while ($Segments-- -gt 0) {
-                [Int]$segmentLength = $Raw[$Index++]
-                while ($segmentLength-- -gt 0) {
-                    $Name += [Char]$Raw[$Index++]
-                }
-                $Name += "."
-            }
-            $Name
-        }
-    }
-
-    PROCESS {
-        $rDataType = [BitConverter]::ToUInt16($DNSRecord, 2)
-        $updatedAtSerial = [BitConverter]::ToUInt32($DNSRecord, 8)
-
-        $ttlRaw = $DNSRecord[12..15]
-        $null = [array]::Reverse($ttlRaw)
-        $ttl = [BitConverter]::ToUInt32($ttlRaw, 0)
-
-        $age = [BitConverter]::ToUInt32($DNSRecord, 20)
-        if ($Age -ne 0) {
-            $timestamp = ((Get-Date -Year 1601 -Month 1 -Day 1 -Hour 0 -Minute 0 -Second 0).AddHours($age)).ToString()
-        }
-        else {
-            $timestamp = '[static]'
-        }
-
-        $dnsRecordObject = New-Object PSObject
-
-        switch ($rDataType) {
-            1 {
-                $IP = "{0}.{1}.{2}.{3}" -f $DNSRecord[24], $DNSRecord[25], $DNSRecord[26], $DNSRecord[27]
-                $data = $IP
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'A'
-            }
-            2 {
-                $NSName = Get-Name $DNSRecord[24..$DNSRecord.length]
-                $data = $NSName
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'NS'
-            }
-            5 {
-                $Alias = Get-Name $DNSRecord[24..$DNSRecord.length]
-                $data = $Alias
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'CNAME'
-            }
-            6 {
-                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'SOA'
-            }
-            12 {
-                $ptr = Get-Name $DNSRecord[24..$DNSRecord.length]
-                $data = $ptr
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'PTR'
-            }
-            13 {
-                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'HINFO'
-            }
-            15 {
-                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'MX'
-            }
-            16 {
-                [string] $txt  = ''
-                [int] $segmentLength = $DNSRecord[24]
-                $Index = 25
-                while ($segmentLength-- -gt 0) {
-                    $txt += [char]$DNSRecord[$index++]
-                }
-                $data = $txt
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'TXT'
-            }
-            28 {
-                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'AAAA'
-            }
-            33 {
-                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'SRV'
-            }
-            default {
-                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'UNKNOWN'
-            }
-        }
-        $dnsRecordObject | Add-Member Noteproperty 'UpdatedAtSerial' $updatedAtSerial
-        $dnsRecordObject | Add-Member Noteproperty 'TTL' $ttl
-        $dnsRecordObject | Add-Member Noteproperty 'Age' $age
-        $dnsRecordObject | Add-Member Noteproperty 'Timestamp' $timestamp
-        $dnsRecordObject | Add-Member Noteproperty 'Data' $data
-        Write-Output $dnsRecordObject
     }
 }
 
