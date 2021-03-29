@@ -77,7 +77,7 @@ Function Get-LdapPassword {
             $secureCurrentPassword = ReadSecureWString -Buffer $blob -StartIndex $currentPasswordOffset
             $previousPasswordOffset = $reader.ReadInt16()
             [SecureString] $securePreviousPassword = $null
-            if($previousPasswordOffset > 0) {
+            if ($previousPasswordOffset > 0) {
                 $securePreviousPassword = ReadSecureWString -Buffer $blob -StartIndex $previousPasswordOffset
             }
             $queryPasswordIntervalOffset = $reader.ReadInt16()
@@ -123,11 +123,11 @@ Function Get-LdapPassword {
         Get-LdapObject -ADSpath $adsPath -Filter $filter -Credential $Credential | ForEach-Object {
             foreach ($attribute in $attributes) {
                 if ($_.$attribute) {
-                    [pscustomobject] @{
+                    Write-Output ([pscustomobject] @{
                         SamAccountName = $_.sAMAccountName
                         Attribute = $attribute
                         Value = $_.$attribute
-                    }
+                    })
                 }
             }
         }
@@ -143,11 +143,11 @@ Function Get-LdapPassword {
         Get-LdapObject -ADSpath $adsPath -Filter $filter -Credential $Credential | ForEach-Object {
             foreach ($attribute in $attributes) {
                 if ($_.$attribute) {
-                    [pscustomobject] @{
+                    Write-Output ([pscustomobject] @{
                         SamAccountName = $_.sAMAccountName
                         Attribute = $attribute
                         Value = [Text.Encoding]::ASCII.GetString($_.$attribute)
-                    }
+                    })
                 }
             }
         }
@@ -157,11 +157,11 @@ Function Get-LdapPassword {
         $filter = "(&(objectCategory=Computer)(ms-MCS-AdmPwd=*))"
         Get-LdapObject -ADSpath $adsPath -Filter $filter -Credential $Credential | ForEach-Object {
             if ($_.'ms-MCS-AdmPwd') {
-                [pscustomobject] @{
+                Write-Output ([pscustomobject] @{
                     SamAccountName = $_.sAMAccountName
                     Attribute = 'ms-MCS-AdmPwd'
                     Value = $_.'ms-MCS-AdmPwd'
-                }
+                })
             }
         }
 
@@ -170,11 +170,11 @@ Function Get-LdapPassword {
         $filter = "(&(objectClass=msDS-GroupManagedServiceAccount)(msDS-ManagedPasswordId=*))"
         Get-LdapObject -ADSpath $adsPath -Filter $filter -Credential $Credential | ForEach-Object {
             if ($_.'msDS-ManagedPassword') {
-                [pscustomobject] @{
+                Write-Output ([pscustomobject] @{
                     SamAccountName = $_.sAMAccountName
                     Attribute = 'msDS-ManagedPassword'
                     Value = ConvertTo-NTHash -Password (ConvertFrom-ADManagedPasswordBlob -Blob $_.'msDS-ManagedPassword').CurrentPassword
-                }
+                })
             }
         }
     }
@@ -250,7 +250,7 @@ Function Get-PasswordPolicy {
 
         # Enumerate fine-grained password policies
         $filter = '(objectClass=msDS-PasswordSettings)'
-        $properties = 'distinguishedName','displayname','AppliesToDN','msds-lockoutthreshold','msds-psoappliesto','msds-minimumpasswordlength','msds-passwordhistorylength','msds-lockoutobservationwindow','msds-lockoutduration','msds-minimumpasswordage','msds-maximumpasswordage','msds-passwordsettingsprecedence','msds-passwordcomplexityenabled','msds-passwordreversibleencryptionenabled'
+        $properties = 'distinguishedName','displayname','msds-lockoutthreshold','msds-psoappliesto','msds-minimumpasswordlength','msds-passwordhistorylength','msds-lockoutobservationwindow','msds-lockoutduration','msds-minimumpasswordage','msds-maximumpasswordage','msds-passwordsettingsprecedence','msds-passwordcomplexityenabled','msds-passwordreversibleencryptionenabled'
         Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
             Write-Output ([pscustomobject] @{
                 DisplayName = $_.displayname
@@ -265,6 +265,75 @@ Function Get-PasswordPolicy {
                 LockoutThreshold = $_.'msds-lockoutthreshold'
                 LockoutDuration = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-lockoutduration')).ToString()
                 LockOutObservationWindow = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-lockoutobservationwindow')).ToString()
+            })
+        }
+    }
+}
+
+Function Get-KerberosDelegation {
+<#
+.SYNOPSIS
+    Enumerate Kerberos delegations.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-KerberosDelegation queries domain controller via LDAP protocol for enabled accounts granted with Kerberos delegation.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.EXAMPLE
+    PS C:\> Get-KerberosDelegation -Server ADATUM.CORP -Credential ADATUM\testuser
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
+    )
+
+    BEGIN {
+        $searchString = "LDAP://$Server/RootDSE"
+        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+        $rootDN = $rootDSE.rootDomainNamingContext[0]
+        $adsPath = "LDAP://$Server/$rootDN"
+    }
+
+    PROCESS {
+        $filter = '(&(!userAccountControl:1.2.840.113556.1.4.803:=2)(|(userAccountControl:1.2.840.113556.1.4.803:=524288)(userAccountControl:1.2.840.113556.1.4.803:=16777216)(msDS-AllowedToDelegateTo=*)(msDS-AllowedToActOnBehalfOfOtherIdentity=*)))'
+        $properties = 'distinguishedName','sAMAccountName','objectClass','userAccountControl','lastLogon','servicePrincipalName','operatingSystem', 'operatingSystemVersion', 'operatingSystemServicePack'
+        Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
+            $trustedForDelegation = $false
+            if ($_.userAccountControl -band 524288) {
+                $trustedForDelegation = $true
+            }
+            $trustedToAuthForDelegation = $false
+            if ($_.userAccountControl -band 16777216) {
+                $trustedForDelegation = $true
+            }
+            Write-Output ([pscustomobject] @{
+                sAMAccountName = $_.samAccountName
+                DistinguishedName = $_.distinguishedname
+                ObjectClass = $_.objectClass
+                TrustedForDelegation = $trustedForDelegation
+                TrustedToAuthForDelegation = $trustedToAuthForDelegation
+                AllowedToDelegateTo = $_.'msDS-AllowedToDelegateTo'
+                AllowedToActOnBehalfOfOtherIdentity = $_.'msDS-AllowedToActOnBehalfofOtherIdentity'
+                ServicePrincipalName = $_.servicePrincipalName
+                LastLogon = ([datetime]::FromFileTime(($_.LastLogon)))
+                OperatingSystem = $_.operatingSystem
+                Version = $_.operatingSystemVersion
+                ServicePack = $_.operatingSystemServicePack
             })
         }
     }
@@ -415,15 +484,14 @@ Function Get-ExchangeVersion {
                     }
                 }
             }
-            $obj = [pscustomobject] @{
+            Write-Output ([pscustomobject] @{
                 Fqdn            = ($exchServer.networkAddress | Where-Object -FilterScript {$_ -like "ncacn_ip_tcp*"}).Split(":")[1]
                 Roles           = [string] ($roleDictionary.Keys | ?{$_ -band $exchServer.msExchCurrentServerRoles} | %{$roleDictionary.Get_Item($_)})
                 Version         = "$($exchVersion.MajorVersion).$($exchVersion.MinorVersion).$($exchVersion.Build)"
                 PrivExchange    = $privExchange
                 'CVE-2020-0688' = $CVE20200688
                 ProxyLogon      = $proxyLogon
-            }
-            Write-Output $obj
+            })
         }
     }
 }
@@ -476,16 +544,14 @@ Function Get-LegacyComputer {
         $filter = "(&(samAccountType=805306369)(!userAccountControl:1.2.840.113556.1.4.803:=2)(|$filter))"
         $properties = 'dnsHostname', 'samAccountName', 'operatingSystem', 'operatingSystemVersion', 'operatingSystemServicePack', 'LastLogon'
         Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
-            Write-Output (
-                [pscustomobject] @{
+            Write-Output ([pscustomobject] @{
                     sAMAccountName = $_.samAccountName
                     ComputerName = $_.dnsHostname
                     OperatingSystem = $_.operatingSystem
                     Version = $_.operatingSystemVersion
                     ServicePack = $_.operatingSystemServicePack
                     LastLogon = ([datetime]::FromFileTime(($_.LastLogon)))
-                }
-            )
+            })
         }
     }
 }
