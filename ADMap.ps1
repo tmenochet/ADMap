@@ -319,7 +319,7 @@ Function Get-KerberosDelegation {
             }
             $trustedToAuthForDelegation = $false
             if ($_.userAccountControl -band 16777216) {
-                $trustedForDelegation = $true
+                $trustedToAuthForDelegation = $true
             }
             Write-Output ([pscustomobject] @{
                 sAMAccountName = $_.samAccountName
