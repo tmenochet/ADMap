@@ -339,6 +339,116 @@ Function Get-KerberosDelegation {
     }
 }
 
+Function Get-KerberoastableUser {
+<#
+.SYNOPSIS
+    Get user accounts vulnerable to Kerberoast attack.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-KerberoastableUser queries domain controller via LDAP protocol for enabled user accounts configured with a SPN attribute.
+    For each account, information about password expiration, encryption type supported and granted privileges is also retrieved.
+    It is a slightly modified version of RiskySPN's Find-PotentiallyCrackableAccounts by @machosec.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.EXAMPLE
+    PS C:\> Get-KerberoastableUser -Server ADATUM.CORP -Credential ADATUM\testuser
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
+    )
+
+    BEGIN {
+        $searchString = "LDAP://$Server/RootDSE"
+        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+        $rootDN = $rootDSE.rootDomainNamingContext[0]
+        $adsPath = "LDAP://$Server/$rootDN"
+
+        $currentDate = Get-Date
+    }
+
+    PROCESS {
+        $properties = 'distinguishedname','samaccountname','displayname','serviceprincipalname','msDS-UserPasswordExpiryTimeComputed','msDS-SupportedEncryptionTypes','useraccountcontrol','msDS-AllowedToDelegateTo','memberof','pwdlastset'
+        $filter = "(&(!userAccountControl:1.2.840.113556.1.4.803:=2)(samAccountType=805306368)(servicePrincipalName=*)(!(samAccountName=krbtgt)))"
+        Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
+            [int32] $userAccountControl = $_.useraccountcontrol
+
+            # Password policy
+            $crackingWindow = "N/A"
+            if ($_.'msds-userpasswordexpirytimecomputed' -ne 9223372036854775807) {
+                $passwordExpiryDate = [datetime]::FromFileTime($_.'msds-userpasswordexpirytimecomputed')
+                $crackingWindow = $passwordExpiryDate.Subtract($currentDate).Days
+            }
+            $passwordLastSet = [datetime]::FromFileTime($_.pwdlastset)
+            $passwordAge = $currentDate.Subtract($passwordLastSet).Days
+            $isPasswordExpires = $true
+            if ($userAccountControl -band 65536) {
+                $isPasswordExpires = $false
+                $crackingWindow = "Indefinitely"
+            }
+
+            # Encryption type
+            $encType = "RC4-HMAC"
+            [int32] $eType = $_.'msds-supportedencryptiontypes'
+            if ($eType) {
+                if ($eType -band 16) {
+                    $encType = "AES256-HMAC"
+                }
+                elseif ($eType -band 8) {
+                    $encType = "AES128-HMAC"
+                }
+            }
+            else {
+                if ($userAccountControl -band 2097152) {
+                    $encType = "DES"
+                }
+            }
+
+            # Kerberos delegation
+            $kerberosDelegation = $false
+            $kerberosTargetService = "None"
+            if ($userAccountControl -band 524288) {
+                $kerberosDelegation = "Unconstrained"
+                $kerberosTargetService = "Any"
+            } 
+            elseif ($_.'msds-allowedtodelegateto') {
+                $kerberosDelegation = "Constrained" 
+                if ($userAccountControl -band 16777216) {
+                    $kerberosDelegation = "Protocol Transition"
+                }
+                $kerberosTargetService = $_.'msds-allowedtodelegateto'
+            }
+
+            Write-Output ([pscustomobject] @{
+                sAMAccountName          = [string]$_.samaccountname
+                ServicePrincipalName    = [array]$_.serviceprincipalname
+                EncryptionType          = $encType
+                PasswordAge             = $passwordAge
+                IsPasswordExpires       = $isPasswordExpires
+                CrackingWindow          = $crackingWindow
+                MemberOf                = $_.memberof -replace "CN=" -replace ",.*"
+                KerberosDelegation      = $kerberosDelegation
+                KerberosTargetService   = $kerberosTargetService
+            })
+        }
+    }
+}
+
 Function Get-PrivExchangeStatus {
 <#
 .SYNOPSIS
