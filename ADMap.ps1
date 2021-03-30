@@ -270,75 +270,6 @@ Function Get-PasswordPolicy {
     }
 }
 
-Function Get-KerberosDelegation {
-<#
-.SYNOPSIS
-    Enumerate Kerberos delegations.
-
-    Author: Timothee MENOCHET (@_tmenochet)
-
-.DESCRIPTION
-    Get-KerberosDelegation queries domain controller via LDAP protocol for enabled accounts granted with Kerberos delegation.
-
-.PARAMETER Server
-    Specifies the domain controller to query.
-
-.PARAMETER Credential
-    Specifies the domain account to use.
-
-.EXAMPLE
-    PS C:\> Get-KerberosDelegation -Server ADATUM.CORP -Credential ADATUM\testuser
-#>
-
-    [CmdletBinding()]
-    Param (
-        [ValidateNotNullOrEmpty()]
-        [String]
-        $Server = $Env:USERDNSDOMAIN,
-
-        [ValidateNotNullOrEmpty()]
-        [Management.Automation.PSCredential]
-        [Management.Automation.Credential()]
-        $Credential = [Management.Automation.PSCredential]::Empty
-    )
-
-    BEGIN {
-        $searchString = "LDAP://$Server/RootDSE"
-        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-        $rootDN = $rootDSE.rootDomainNamingContext[0]
-        $adsPath = "LDAP://$Server/$rootDN"
-    }
-
-    PROCESS {
-        $filter = '(&(!userAccountControl:1.2.840.113556.1.4.803:=2)(|(userAccountControl:1.2.840.113556.1.4.803:=524288)(userAccountControl:1.2.840.113556.1.4.803:=16777216)(msDS-AllowedToDelegateTo=*)(msDS-AllowedToActOnBehalfOfOtherIdentity=*)))'
-        $properties = 'distinguishedName','sAMAccountName','objectClass','userAccountControl','lastLogon','servicePrincipalName','operatingSystem', 'operatingSystemVersion', 'operatingSystemServicePack'
-        Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
-            $trustedForDelegation = $false
-            if ($_.userAccountControl -band 524288) {
-                $trustedForDelegation = $true
-            }
-            $trustedToAuthForDelegation = $false
-            if ($_.userAccountControl -band 16777216) {
-                $trustedToAuthForDelegation = $true
-            }
-            Write-Output ([pscustomobject] @{
-                sAMAccountName = $_.samAccountName
-                DistinguishedName = $_.distinguishedname
-                ObjectClass = $_.objectClass
-                TrustedForDelegation = $trustedForDelegation
-                TrustedToAuthForDelegation = $trustedToAuthForDelegation
-                AllowedToDelegateTo = $_.'msDS-AllowedToDelegateTo'
-                AllowedToActOnBehalfOfOtherIdentity = $_.'msDS-AllowedToActOnBehalfofOtherIdentity'
-                ServicePrincipalName = $_.servicePrincipalName
-                LastLogon = ([datetime]::FromFileTime(($_.LastLogon)))
-                OperatingSystem = $_.operatingSystem
-                Version = $_.operatingSystemVersion
-                ServicePack = $_.operatingSystemServicePack
-            })
-        }
-    }
-}
-
 Function Get-KerberoastableUser {
 <#
 .SYNOPSIS
@@ -421,30 +352,137 @@ Function Get-KerberoastableUser {
 
             # Kerberos delegation
             $kerberosDelegation = $false
-            $kerberosTargetService = "None"
-            if ($userAccountControl -band 524288) {
-                $kerberosDelegation = "Unconstrained"
-                $kerberosTargetService = "Any"
-            } 
-            elseif ($_.'msds-allowedtodelegateto') {
-                $kerberosDelegation = "Constrained" 
+            $delegationTargetService = 'None'
+            if ($_.userAccountControl -band 524288) {
+                # TRUSTED_FOR_DELEGATION
+                $kerberosDelegation = 'Unconstrained'
+                $delegationTargetService = 'Any'
+            }
+            elseif ($_.'msDS-AllowedToDelegateTo') {
+                $kerberosDelegation = 'Constrained' 
                 if ($userAccountControl -band 16777216) {
-                    $kerberosDelegation = "Protocol Transition"
+                    # TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION
+                    $kerberosDelegation = 'Protocol Transition'
                 }
-                $kerberosTargetService = $_.'msds-allowedtodelegateto'
+                $delegationTargetService = $_.'msDS-AllowedToDelegateTo'
             }
 
             Write-Output ([pscustomobject] @{
-                sAMAccountName          = [string]$_.samaccountname
-                ServicePrincipalName    = [array]$_.serviceprincipalname
+                sAMAccountName          = $_.samaccountname
+                ServicePrincipalName    = $_.serviceprincipalname
                 EncryptionType          = $encType
                 PasswordAge             = $passwordAge
                 IsPasswordExpires       = $isPasswordExpires
                 CrackingWindow          = $crackingWindow
                 MemberOf                = $_.memberof -replace "CN=" -replace ",.*"
                 KerberosDelegation      = $kerberosDelegation
-                KerberosTargetService   = $kerberosTargetService
+                DelegationTargetService = $delegationTargetService
             })
+        }
+    }
+}
+
+Function Get-KerberosDelegation {
+<#
+.SYNOPSIS
+    Enumerate Kerberos delegations.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-KerberosDelegation queries domain controller via LDAP protocol for enabled accounts granted with Kerberos delegation.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.EXAMPLE
+    PS C:\> Get-KerberosDelegation -Server ADATUM.CORP -Credential ADATUM\testuser
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
+    )
+
+    BEGIN {
+        $searchString = "LDAP://$Server/RootDSE"
+        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+        $rootDN = $rootDSE.rootDomainNamingContext[0]
+        $adsPath = "LDAP://$Server/$rootDN"
+    }
+
+    PROCESS {
+        $filter = '(&(!userAccountControl:1.2.840.113556.1.4.803:=2)(|(userAccountControl:1.2.840.113556.1.4.803:=524288)(userAccountControl:1.2.840.113556.1.4.803:=16777216)(msDS-AllowedToDelegateTo=*)(msDS-AllowedToActOnBehalfOfOtherIdentity=*)))'
+        $properties = 'distinguishedName','sAMAccountName','objectClass','userAccountControl','msDS-AllowedToActOnBehalfOfOtherIdentity','lastLogon','servicePrincipalName','operatingSystem','operatingSystemVersion','operatingSystemServicePack'
+        Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
+            $obj = $_
+            $kerberosDelegation = $false
+            $delegationTargetService = 'None'
+            $rbcdService = 'None'
+
+            # Unconstrained delegation
+            if ($_.userAccountControl -band 524288) {
+                # TRUSTED_FOR_DELEGATION
+                $kerberosDelegation = 'Unconstrained'
+                $delegationTargetService = 'Any'
+            }
+
+            # Constrained delegation
+            elseif ($_.'msDS-AllowedToDelegateTo') {
+                $kerberosDelegation = 'Constrained'
+                if ($userAccountControl -band 16777216) {
+                    # TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION
+                    $kerberosDelegation = 'Protocol Transition'
+                }
+                $delegationTargetService = $_.'msDS-AllowedToDelegateTo'
+            }
+
+            if ($kerberosDelegation) {
+                Write-Output ([pscustomobject] @{
+                    sAMAccountName          = $_.samAccountName
+                    DistinguishedName       = $_.distinguishedname
+                    ObjectClass             = $_.objectClass
+                    ServicePrincipalName    = $_.servicePrincipalName
+                    KerberosDelegation      = $kerberosDelegation
+                    DelegationTargetService = $delegationTargetService
+                    LastLogon               = ([datetime]::FromFileTime(($_.LastLogon)))
+                    OperatingSystem         = $_.operatingSystem
+                    Version                 = $_.operatingSystemVersion
+                    ServicePack             = $_.operatingSystemServicePack
+                })
+            }
+
+            # Resource-based constrained delegation
+            if ($rbcd = $obj.'msDS-AllowedToActOnBehalfOfOtherIdentity') {
+                $d = New-Object Security.AccessControl.RawSecurityDescriptor -ArgumentList $rbcd, 0
+                $d.DiscretionaryAcl | ForEach-Object {
+                    $filter = "(objectsid=$($_.SecurityIdentifier))"
+                    Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
+                        Write-Output ([pscustomobject] @{
+                            sAMAccountName          = $_.samAccountName
+                            DistinguishedName       = $_.distinguishedname
+                            ObjectClass             = $_.objectClass
+                            ServicePrincipalName    = $_.servicePrincipalName
+                            KerberosDelegation      = 'Resource-Based Constrained'
+                            DelegationTargetService = $obj.distinguishedname
+                            LastLogon               = ([datetime]::FromFileTime(($_.LastLogon)))
+                            OperatingSystem         = $_.operatingSystem
+                            Version                 = $_.operatingSystemVersion
+                            ServicePack             = $_.operatingSystemServicePack
+                        })
+                    }
+                }
+            }
         }
     }
 }
@@ -648,7 +686,7 @@ Function Get-LegacyComputer {
     PROCESS {
         $legacyOS = '2000', '2003', '2008', 'ME', 'XP', 'Vista', 'Windows NT', 'Windows 7', 'Windows 8'
         $filter = ''
-        foreach($os in $legacyOS) {
+        foreach ($os in $legacyOS) {
             $filter += "(operatingsystem=*$os*)"
         }
         $filter = "(&(samAccountType=805306369)(!userAccountControl:1.2.840.113556.1.4.803:=2)(|$filter))"
