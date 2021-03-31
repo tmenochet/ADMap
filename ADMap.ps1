@@ -105,10 +105,15 @@ Function Get-LdapPassword {
             return (($ntHash | ForEach-Object ToString X2) -join '')
         }
 
-        $searchString = "LDAP://$Server/RootDSE"
-        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-        $rootDN = $rootDSE.rootDomainNamingContext[0]
-        $adsPath = "LDAP://$Server/$rootDN"
+        try {
+            $searchString = "LDAP://$Server/RootDSE"
+            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+            $rootDN = $rootDSE.rootDomainNamingContext[0]
+            $adsPath = "LDAP://$Server/$rootDN"
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
     }
 
     PROCESS {
@@ -183,7 +188,7 @@ Function Get-LdapPassword {
 Function Get-PasswordPolicy {
 <#
 .SYNOPSIS
-    Get password policies defined in Active Directory.
+    Get password policies defined in an Active Directory domain.
 
     Author: Timothee MENOCHET (@_tmenochet)
 
@@ -213,10 +218,15 @@ Function Get-PasswordPolicy {
     )
 
     BEGIN {
-        $searchString = "LDAP://$Server/RootDSE"
-        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-        $rootDN = $rootDSE.rootDomainNamingContext[0]
-        $adsPath = "LDAP://$Server/$rootDN"
+        try {
+            $searchString = "LDAP://$Server/RootDSE"
+            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+            $rootDN = $rootDSE.rootDomainNamingContext[0]
+            $adsPath = "LDAP://$Server/$rootDN"
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
     }
 
     PROCESS {
@@ -305,10 +315,15 @@ Function Get-KerberoastableUser {
     )
 
     BEGIN {
-        $searchString = "LDAP://$Server/RootDSE"
-        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-        $rootDN = $rootDSE.rootDomainNamingContext[0]
-        $adsPath = "LDAP://$Server/$rootDN"
+        try {
+            $searchString = "LDAP://$Server/RootDSE"
+            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+            $rootDN = $rootDSE.rootDomainNamingContext[0]
+            $adsPath = "LDAP://$Server/$rootDN"
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
 
         $currentDate = Get-Date
     }
@@ -415,10 +430,15 @@ Function Get-KerberosDelegation {
     )
 
     BEGIN {
-        $searchString = "LDAP://$Server/RootDSE"
-        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-        $rootDN = $rootDSE.rootDomainNamingContext[0]
-        $adsPath = "LDAP://$Server/$rootDN"
+        try {
+            $searchString = "LDAP://$Server/RootDSE"
+            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+            $rootDN = $rootDSE.rootDomainNamingContext[0]
+            $adsPath = "LDAP://$Server/$rootDN"
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
     }
 
     PROCESS {
@@ -487,6 +507,133 @@ Function Get-KerberosDelegation {
     }
 }
 
+Function Get-TrustRelationship {
+<#
+.SYNOPSIS
+    Enumerate trust relationships defined in an Active Directory domain.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-TrustRelationship queries domain controller via LDAP protocol for domain trusts.
+    It is a slightly modified version of PowerView's Get-DomainTrust by @harmj0y.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.EXAMPLE
+    PS C:\> Get-TrustRelationship -Server ADATUM.CORP -Credential ADATUM\testuser
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
+    )
+
+    BEGIN {
+        Function Get-SidFilteringStatus {
+            Param (
+                [int] $TrustDirection,
+                [uint32] $TrustAttributes
+            )
+
+            if ($TrustDirection -eq 0 -or $TrustDirection -eq 1 -or ($TrustAttributes -band 32) -or ($TrustAttributes -band 0x400) -or ($TrustAttributes -band 0x00400000) -or ($trustAttributes -band 0x00800000)) {
+                return "N/A"
+            }
+            if ($TrustAttributes -band 8) {
+                if ($TrustAttributes -band 4) {
+                    # quarantined
+                    return "Yes"
+                }
+                elseif ($TrustAttributes -band 64) {
+                    # forest trust migration
+                    return "No"
+                }
+                return "Yes"
+            }
+            elseif ($TrustAttributes -band 0x00800000) {
+                # obsolete tree root which
+                return "N/A"
+            }
+            else {
+                if ($TrustAttributes -band 4) {
+                    # quarantined
+                    return "Yes"
+                }
+                return "No"
+            }
+        }
+
+       $trustAttributes = @{
+            [uint32]'0x00000001' = 'NON_TRANSITIVE'
+            [uint32]'0x00000002' = 'UPLEVEL_ONLY'
+            [uint32]'0x00000004' = 'FILTER_SIDS'
+            [uint32]'0x00000008' = 'FOREST_TRANSITIVE'
+            [uint32]'0x00000010' = 'CROSS_ORGANIZATION'
+            [uint32]'0x00000020' = 'WITHIN_FOREST'
+            [uint32]'0x00000040' = 'TREAT_AS_EXTERNAL'
+            [uint32]'0x00000080' = 'TRUST_USES_RC4_ENCRYPTION'
+            [uint32]'0x00000100' = 'TRUST_USES_AES_KEYS'
+            [uint32]'0x00000200' = 'CROSS_ORGANIZATION_NO_TGT_DELEGATION'
+            [uint32]'0x00000400' = 'PIM_TRUST'
+        }
+
+        try {
+            $searchString = "LDAP://$Server/RootDSE"
+            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+            $rootDN = $rootDSE.rootDomainNamingContext[0]
+            $adsPath = "LDAP://$Server/CN=System,$rootDN"
+            $domain = $rootDN -replace 'DC=' -replace ',','.'
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
+    }
+
+    PROCESS {
+        $filter = '(objectCategory=trustedDomain)'
+        $properties = 'distinguishedName','trustPartner','trustDirection','trustType','trustAttributes','whenCreated','whenChanged'
+        Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
+            $obj = $_
+            $trustType = Switch ($obj.trustType) {
+                1 { 'WINDOWS_NON_ACTIVE_DIRECTORY' }
+                2 { 'WINDOWS_ACTIVE_DIRECTORY' }
+                3 { 'MIT' }
+            }
+            $trustDirection = Switch ($obj.trustDirection) {
+                0 { 'Disabled' }
+                1 { 'Inbound' }
+                2 { 'Outbound' }
+                3 { 'Bidirectional' }
+            }
+            $trustAttrib = @()
+            $trustAttrib += $trustAttributes.Keys | Where-Object { $obj.trustAttributes -band $_ } | ForEach-Object { $trustAttributes[$_] }
+            $sidFiltering = Get-SidFilteringStatus -TrustDirection $obj.trustDirection -TrustAttributes $obj.trustAttributes
+
+            Write-Output ([pscustomobject] @{
+                TrusteeDomain       = $domain
+                TrustedDomain       = $obj.trustPartner
+                TrustType           = $trustType
+                TrustDirection      = $trustDirection
+                SidFiltering        = $sidFiltering
+                TrustAttribute      = $trustAttrib
+                WhenCreated         = $obj.whenCreated
+                WhenChanged         = $obj.whenChanged
+            })
+        }
+    }
+}
+
 Function Get-PrivExchangeStatus {
 <#
 .SYNOPSIS
@@ -520,10 +667,15 @@ Function Get-PrivExchangeStatus {
     )
 
     BEGIN {
-        $searchString = "LDAP://$Server/RootDSE"
-        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-        $rootDN = $rootDSE.rootDomainNamingContext[0]
-        $adsPath = "LDAP://$Server/$rootDN"
+        try {
+            $searchString = "LDAP://$Server/RootDSE"
+            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+            $rootDN = $rootDSE.rootDomainNamingContext[0]
+            $adsPath = "LDAP://$Server/$rootDN"
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
     }
 
     PROCESS {
@@ -587,10 +739,15 @@ Function Get-ExchangeVersion {
             }
         }
 
-        $searchString = "LDAP://$Server/RootDSE"
-        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-        $rootDN = $rootDSE.rootDomainNamingContext[0]
-        $adsPath = "LDAP://$Server/$rootDN"
+        try {
+            $searchString = "LDAP://$Server/RootDSE"
+            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+            $rootDN = $rootDSE.rootDomainNamingContext[0]
+            $adsPath = "LDAP://$Server/$rootDN"
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
     }
 
     PROCESS {
@@ -677,10 +834,15 @@ Function Get-LegacyComputer {
     )
 
     BEGIN {
-        $searchString = "LDAP://$Server/RootDSE"
-        $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-        $rootDN = $rootDSE.rootDomainNamingContext[0]
-        $adsPath = "LDAP://$Server/$rootDN"
+        try {
+            $searchString = "LDAP://$Server/RootDSE"
+            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+            $rootDN = $rootDSE.rootDomainNamingContext[0]
+            $adsPath = "LDAP://$Server/$rootDN"
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
     }
 
     PROCESS {
@@ -744,128 +906,137 @@ Function Get-DnsRecord {
         $ZoneName
     )
 
-    Function Local:Get-Name ([Byte[]] $Raw) {
-        [Int] $Length = $Raw[0]
-        [Int] $Segments = $Raw[1]
-        [Int] $Index =  2
-        [String] $Name  = ''
-        while ($Segments-- -gt 0) {
-            [Int]$segmentLength = $Raw[$Index++]
-            while ($segmentLength-- -gt 0) {
-                $Name += [Char]$Raw[$Index++]
-            }
-            $Name += "."
-        }
-        $Name
-    }
-
-    Function Local:ConvertFrom-DNSRecord ([Byte[]]$DNSRecord) {
-        $rDataType = [BitConverter]::ToUInt16($DNSRecord, 2)
-        $updatedAtSerial = [BitConverter]::ToUInt32($DNSRecord, 8)
-
-        $ttlRaw = $DNSRecord[12..15]
-        $null = [array]::Reverse($ttlRaw)
-        $ttl = [BitConverter]::ToUInt32($ttlRaw, 0)
-
-        $age = [BitConverter]::ToUInt32($DNSRecord, 20)
-        if ($Age -ne 0) {
-            $timestamp = ((Get-Date -Year 1601 -Month 1 -Day 1 -Hour 0 -Minute 0 -Second 0).AddHours($age)).ToString()
-        }
-        else {
-            $timestamp = '[static]'
-        }
-
-        $dnsRecordObject = New-Object PSObject
-
-        switch ($rDataType) {
-            1 {
-                $IP = "{0}.{1}.{2}.{3}" -f $DNSRecord[24], $DNSRecord[25], $DNSRecord[26], $DNSRecord[27]
-                $data = $IP
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'A'
-            }
-            2 {
-                $NSName = Get-Name $DNSRecord[24..$DNSRecord.length]
-                $data = $NSName
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'NS'
-            }
-            5 {
-                $Alias = Get-Name $DNSRecord[24..$DNSRecord.length]
-                $data = $Alias
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'CNAME'
-            }
-            6 {
-                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'SOA'
-            }
-            12 {
-                $ptr = Get-Name $DNSRecord[24..$DNSRecord.length]
-                $data = $ptr
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'PTR'
-            }
-            13 {
-                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'HINFO'
-            }
-            15 {
-                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'MX'
-            }
-            16 {
-                [string] $txt  = ''
-                [int] $segmentLength = $DNSRecord[24]
-                $Index = 25
+    BEGIN {
+        Function Local:Get-Name ([Byte[]] $Raw) {
+            [Int] $Length = $Raw[0]
+            [Int] $Segments = $Raw[1]
+            [Int] $Index =  2
+            [String] $Name  = ''
+            while ($Segments-- -gt 0) {
+                [Int]$segmentLength = $Raw[$Index++]
                 while ($segmentLength-- -gt 0) {
-                    $txt += [char]$DNSRecord[$index++]
+                    $Name += [Char]$Raw[$Index++]
                 }
-                $data = $txt
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'TXT'
+                $Name += "."
             }
-            28 {
-                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'AAAA'
-            }
-            33 {
-                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'SRV'
-            }
-            default {
-                $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
-                $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'UNKNOWN'
-            }
+            $Name
         }
-        $dnsRecordObject | Add-Member Noteproperty 'UpdatedAtSerial' $updatedAtSerial
-        $dnsRecordObject | Add-Member Noteproperty 'TTL' $ttl
-        $dnsRecordObject | Add-Member Noteproperty 'Age' $age
-        $dnsRecordObject | Add-Member Noteproperty 'Timestamp' $timestamp
-        $dnsRecordObject | Add-Member Noteproperty 'Data' $data
-        Write-Output $dnsRecordObject
+
+        Function Local:ConvertFrom-DNSRecord ([Byte[]]$DNSRecord) {
+            $rDataType = [BitConverter]::ToUInt16($DNSRecord, 2)
+            $updatedAtSerial = [BitConverter]::ToUInt32($DNSRecord, 8)
+
+            $ttlRaw = $DNSRecord[12..15]
+            $null = [array]::Reverse($ttlRaw)
+            $ttl = [BitConverter]::ToUInt32($ttlRaw, 0)
+
+            $age = [BitConverter]::ToUInt32($DNSRecord, 20)
+            if ($Age -ne 0) {
+                $timestamp = ((Get-Date -Year 1601 -Month 1 -Day 1 -Hour 0 -Minute 0 -Second 0).AddHours($age)).ToString()
+            }
+            else {
+                $timestamp = '[static]'
+            }
+
+            $dnsRecordObject = New-Object PSObject
+
+            switch ($rDataType) {
+                1 {
+                    $IP = "{0}.{1}.{2}.{3}" -f $DNSRecord[24], $DNSRecord[25], $DNSRecord[26], $DNSRecord[27]
+                    $data = $IP
+                    $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'A'
+                }
+                2 {
+                    $NSName = Get-Name $DNSRecord[24..$DNSRecord.length]
+                    $data = $NSName
+                    $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'NS'
+                }
+                5 {
+                    $Alias = Get-Name $DNSRecord[24..$DNSRecord.length]
+                    $data = $Alias
+                    $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'CNAME'
+                }
+                6 {
+                    $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                    $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'SOA'
+                }
+                12 {
+                    $ptr = Get-Name $DNSRecord[24..$DNSRecord.length]
+                    $data = $ptr
+                    $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'PTR'
+                }
+                13 {
+                    $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                    $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'HINFO'
+                }
+                15 {
+                    $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                    $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'MX'
+                }
+                16 {
+                    [string] $txt  = ''
+                    [int] $segmentLength = $DNSRecord[24]
+                    $Index = 25
+                    while ($segmentLength-- -gt 0) {
+                        $txt += [char]$DNSRecord[$index++]
+                    }
+                    $data = $txt
+                    $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'TXT'
+                }
+                28 {
+                    $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                    $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'AAAA'
+                }
+                33 {
+                    $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                    $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'SRV'
+                }
+                default {
+                    $data = $([Convert]::ToBase64String($DNSRecord[24..$DNSRecord.length]))
+                    $dnsRecordObject | Add-Member Noteproperty 'RecordType' 'UNKNOWN'
+                }
+            }
+            $dnsRecordObject | Add-Member Noteproperty 'UpdatedAtSerial' $updatedAtSerial
+            $dnsRecordObject | Add-Member Noteproperty 'TTL' $ttl
+            $dnsRecordObject | Add-Member Noteproperty 'Age' $age
+            $dnsRecordObject | Add-Member Noteproperty 'Timestamp' $timestamp
+            $dnsRecordObject | Add-Member Noteproperty 'Data' $data
+            Write-Output $dnsRecordObject
+        }
+
+        try {
+            $searchString = "LDAP://$Server/RootDSE"
+            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+            $rootDN = $rootDSE.rootDomainNamingContext[0]
+            if (-not $PSBoundParameters['ZoneName']) {
+                $ZoneName = $rootDN -replace 'DC=' -replace ',', '.'
+            }
+            $adsPath = "LDAP://$Server/DC=$($ZoneName),CN=MicrosoftDNS,DC=DomainDnsZones,$rootDN"
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
     }
 
-    $searchString = "LDAP://$Server/RootDSE"
-    $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-    $rootDN = $rootDSE.rootDomainNamingContext[0]
-    if (-not $PSBoundParameters['ZoneName']) {
-        $ZoneName = $rootDN -replace 'DC=' -replace ',', '.'
-    }
-    $adsPath = "LDAP://$Server/DC=$($ZoneName),CN=MicrosoftDNS,DC=DomainDnsZones,$rootDN"
-
-    $filter = '(objectClass=dnsNode)'
-    $properties = 'name', 'distinguishedname', 'dnsrecord', 'whencreated', 'whenchanged'
-    Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
-        $obj = $_
-        if ($obj.dnsrecord -is [DirectoryServices.ResultPropertyValueCollection]) {
-            $record = ConvertFrom-DNSRecord -DNSRecord $obj.dnsrecord[0]
-        }
-        else {
-            $record = ConvertFrom-DNSRecord -DNSRecord $obj.dnsrecord
-        }
-        if ($record) {
-            $record.PSObject.Properties | ForEach-Object {
-                $obj | Add-Member NoteProperty $_.Name $_.Value
+    PROCESS {
+        $filter = '(objectClass=dnsNode)'
+        $properties = 'name', 'distinguishedname', 'dnsrecord', 'whencreated', 'whenchanged'
+        Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
+            $obj = $_
+            if ($obj.dnsrecord -is [DirectoryServices.ResultPropertyValueCollection]) {
+                $record = ConvertFrom-DNSRecord -DNSRecord $obj.dnsrecord[0]
             }
+            else {
+                $record = ConvertFrom-DNSRecord -DNSRecord $obj.dnsrecord
+            }
+            if ($record) {
+                $record.PSObject.Properties | ForEach-Object {
+                    $obj | Add-Member NoteProperty $_.Name $_.Value
+                }
+            }
+            $obj | Add-Member NoteProperty 'ZoneName' $ZoneName
+            Write-Output $obj | Select 'ZoneName','RecordType','Name','Data','Timestamp','WhenCreated','WhenChanged'
         }
-        $obj | Add-Member NoteProperty 'ZoneName' $ZoneName
-        Write-Output $obj | Select 'ZoneName','RecordType','Name','Data','Timestamp','WhenCreated','WhenChanged'
     }
 }
 
