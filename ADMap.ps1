@@ -1,3 +1,308 @@
+Function Get-DomainInfo {
+<#
+.SYNOPSIS
+    Get basic information about a given Active Directory domain.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-DomainInfo queries domain controller via LDAP protocol for basic information concerning Active Directory configuration.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.EXAMPLE
+    PS C:\> Get-DomainInfo -Server ADATUM.CORP -Credential ADATUM\testuser
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
+    )
+
+    BEGIN {
+        $functionalLevels = @{
+            0 = 'Windows 2000'
+            1 = 'Windows Server 2003 Interim'
+            2 = 'Windows Server 2003'
+            3 = 'Windows Server 2008'
+            4 = 'Windows Server 2008 R2'
+            5 = 'Windows Server 2012'
+            6 = 'Windows Server 2012 R2'
+            7 = 'Windows Server 2016'
+        }
+
+        try {
+            $searchString = "LDAP://$Server/RootDSE"
+            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+            $defaultNC = $rootDSE.defaultNamingContext[0]
+            $configurationNC = $rootDSE.configurationNamingContext[0]
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
+    }
+
+    PROCESS {
+        $filter = '(objectClass=domain)'
+        $properties = 'name','objectsid','ms-ds-machineaccountquota'
+        $domain = Get-LdapObject -ADSpath "LDAP://$Server/$defaultNC" -Credential $Credential -Filter $filter -Properties $properties -SearchScope 'Base'
+
+        $filter = '(objectClass=site)'
+        $sites = (Get-LdapObject -ADSpath "LDAP://$Server/$configurationNC" -Credential $Credential -Filter $filter -Properties 'name').name
+
+        $filter = '(&(objectCategory=nTDSDSA)(options:1.2.840.113556.1.4.803:=1))'
+        $globalCatalogs = (Get-LdapObject -ADSpath "LDAP://$Server/$configurationNC" -Credential $Credential -Filter $filter -Properties 'distinguishedname').distinguishedname
+        $globalCatalogs = $globalCatalogs -replace 'CN=NTDS Settings,'
+
+        Write-Output ([pscustomobject] @{
+            DomainName                      = $defaultNC -replace 'DC=' -replace ',','.'
+            NetbiosName                     = $domain.name
+            DomainSID                       = (New-Object Security.Principal.SecurityIdentifier($domain.objectsid, 0)).Value
+            Forest                          = ($rootDSE.rootDomainNamingContext[0]) -replace 'DC=' -replace ',','.'
+            ForestFunctionalLevel           = $functionalLevels[[int] $rootDSE.forestFunctionality[0]]
+            DomainFunctionalLevel           = $functionalLevels[[int] $rootDSE.domainFunctionality[0]]
+            DomainControllerFunctionalLevel = $functionalLevels[[int] $rootDSE.domainControllerFunctionality[0]]
+            GlobalCatalogs                  = $globalCatalogs
+            Sites                           = $sites
+            MachineAccountQuota             = $domain.'ms-ds-machineaccountquota'
+        })
+    }
+}
+
+Function Get-TrustRelationship {
+<#
+.SYNOPSIS
+    Enumerate trust relationships defined in an Active Directory domain.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-TrustRelationship queries domain controller via LDAP protocol for domain trusts.
+    It is a slightly modified version of PowerView's Get-DomainTrust by @harmj0y.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.EXAMPLE
+    PS C:\> Get-TrustRelationship -Server ADATUM.CORP -Credential ADATUM\testuser
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
+    )
+
+    BEGIN {
+        Function Get-SidFilteringStatus {
+            Param (
+                [int] $TrustDirection,
+                [uint32] $TrustAttributes
+            )
+
+            if ($TrustDirection -eq 0 -or $TrustDirection -eq 1 -or ($TrustAttributes -band 32) -or ($TrustAttributes -band 0x400) -or ($TrustAttributes -band 0x00400000) -or ($trustAttributes -band 0x00800000)) {
+                return "N/A"
+            }
+            if ($TrustAttributes -band 8) {
+                if ($TrustAttributes -band 4) {
+                    # quarantined
+                    return "Yes"
+                }
+                elseif ($TrustAttributes -band 64) {
+                    # forest trust migration
+                    return "No"
+                }
+                return "Yes"
+            }
+            elseif ($TrustAttributes -band 0x00800000) {
+                # obsolete tree root which
+                return "N/A"
+            }
+            else {
+                if ($TrustAttributes -band 4) {
+                    # quarantined
+                    return "Yes"
+                }
+                return "No"
+            }
+        }
+
+       $trustAttributes = @{
+            [uint32]'0x00000001' = 'NON_TRANSITIVE'
+            [uint32]'0x00000002' = 'UPLEVEL_ONLY'
+            [uint32]'0x00000004' = 'FILTER_SIDS'
+            [uint32]'0x00000008' = 'FOREST_TRANSITIVE'
+            [uint32]'0x00000010' = 'CROSS_ORGANIZATION'
+            [uint32]'0x00000020' = 'WITHIN_FOREST'
+            [uint32]'0x00000040' = 'TREAT_AS_EXTERNAL'
+            [uint32]'0x00000080' = 'TRUST_USES_RC4_ENCRYPTION'
+            [uint32]'0x00000100' = 'TRUST_USES_AES_KEYS'
+            [uint32]'0x00000200' = 'CROSS_ORGANIZATION_NO_TGT_DELEGATION'
+            [uint32]'0x00000400' = 'PIM_TRUST'
+        }
+
+        try {
+            $searchString = "LDAP://$Server/RootDSE"
+            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+            $defaultNC = $rootDSE.defaultNamingContext[0]
+            $adsPath = "LDAP://$Server/CN=System,$defaultNC"
+            $domain = $defaultNC -replace 'DC=' -replace ',','.'
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
+    }
+
+    PROCESS {
+        $filter = '(objectCategory=trustedDomain)'
+        $properties = 'distinguishedName','trustPartner','securityIdentifier','trustDirection','trustType','trustAttributes','whenCreated','whenChanged'
+        Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
+            $obj = $_
+            $trustType = Switch ($obj.trustType) {
+                1 { 'WINDOWS_NON_ACTIVE_DIRECTORY' }
+                2 { 'WINDOWS_ACTIVE_DIRECTORY' }
+                3 { 'MIT' }
+            }
+            $trustDirection = Switch ($obj.trustDirection) {
+                0 { 'Disabled' }
+                1 { 'Inbound' }
+                2 { 'Outbound' }
+                3 { 'Bidirectional' }
+            }
+            $trustAttrib = @()
+            $trustAttrib += $trustAttributes.Keys | Where-Object { $obj.trustAttributes -band $_ } | ForEach-Object { $trustAttributes[$_] }
+            $sidFiltering = Get-SidFilteringStatus -TrustDirection $obj.trustDirection -TrustAttributes $obj.trustAttributes
+
+            Write-Output ([pscustomobject] @{
+                TrusteeDomainName   = $domain
+                TrustedDomainName   = $obj.trustPartner
+                TrustedDomainSID    = (New-Object Security.Principal.SecurityIdentifier($obj.securityIdentifier,0)).Value
+                TrustType           = $trustType
+                TrustDirection      = $trustDirection
+                SidFiltering        = $sidFiltering
+                TrustAttribute      = $trustAttrib
+                WhenCreated         = $obj.whenCreated
+                WhenChanged         = $obj.whenChanged
+            })
+        }
+    }
+}
+
+Function Get-PasswordPolicy {
+<#
+.SYNOPSIS
+    Get password policies defined in an Active Directory domain.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-LdapPassword queries domain controller via LDAP protocol for default password policy as well as fine-grained password policies.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.EXAMPLE
+    PS C:\> Get-PasswordPolicy -Server ADATUM.CORP -Credential ADATUM\testuser
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
+    )
+
+    BEGIN {
+        try {
+            $searchString = "LDAP://$Server/RootDSE"
+            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+            $defaultNC = $rootDSE.defaultNamingContext[0]
+            $adsPath = "LDAP://$Server/$defaultNC"
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
+    }
+
+    PROCESS {
+        # Enumerate domain password policy
+        $filter = '(objectClass=domain)'
+        $properties = 'distinguishedName','displayname','name','minPwdLength','minPwdAge','maxPwdAge','pwdHistoryLength','pwdProperties','lockoutDuration','lockoutThreshold','lockOutObservationWindow'
+        Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties -SearchScope 'Base' | ForEach-Object {
+            $complexityEnabled = $false
+            if ($_.pwdProperties -band 1) {
+                $complexityEnabled = $true
+            }
+            $reversibleEncryptionEnabled = $false
+            if ($_.pwdProperties -band 16) {
+                $reversibleEncryptionEnabled = $true
+            }
+            Write-Output ([pscustomobject] @{
+                DisplayName = 'Default Domain Policy'
+                DistinguishedName = $_.distinguishedName
+                AppliesTo = $_.name
+                MinPasswordLength = $_.minPwdLength
+                MinPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($_.minPwdAge)).ToString()
+                MaxPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($_.maxPwdAge)).ToString()
+                PasswordHistoryCount = $_.pwdHistoryLength
+                ComplexityEnabled = $complexityEnabled
+                ReversibleEncryptionEnabled = $reversibleEncryptionEnabled
+                LockoutThreshold = $_.lockoutThreshold
+                LockoutDuration = [TimeSpan]::FromTicks([Math]::ABS($_.lockoutDuration)).ToString()
+                LockOutObservationWindow = [TimeSpan]::FromTicks([Math]::ABS($_.lockOutObservationWindow)).ToString()
+            })
+        }
+
+        # Enumerate fine-grained password policies
+        $filter = '(objectClass=msDS-PasswordSettings)'
+        $properties = 'distinguishedName','displayname','msds-lockoutthreshold','msds-psoappliesto','msds-minimumpasswordlength','msds-passwordhistorylength','msds-lockoutobservationwindow','msds-lockoutduration','msds-minimumpasswordage','msds-maximumpasswordage','msds-passwordsettingsprecedence','msds-passwordcomplexityenabled','msds-passwordreversibleencryptionenabled'
+        Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
+            Write-Output ([pscustomobject] @{
+                DisplayName = $_.displayname
+                DistinguishedName = $_.distinguishedName
+                AppliesTo = $_.'msds-psoappliesto'
+                MinPasswordLength = $_.'msds-minimumpasswordlength'
+                MinPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-minimumpasswordage')).ToString()
+                MaxPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-maximumpasswordage')).ToString()
+                PasswordHistoryCount = $_.'msds-passwordhistorylength'
+                ComplexityEnabled = $_.'msds-passwordcomplexityenabled'
+                ReversibleEncryptionEnabled = $_.'msds-passwordreversibleencryptionenabled'
+                LockoutThreshold = $_.'msds-lockoutthreshold'
+                LockoutDuration = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-lockoutduration')).ToString()
+                LockOutObservationWindow = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-lockoutobservationwindow')).ToString()
+            })
+        }
+    }
+}
+
 Function Get-LdapPassword {
 <#
 .SYNOPSIS
@@ -38,7 +343,6 @@ Function Get-LdapPassword {
         [Management.Automation.Credential()]
         $Credential = [Management.Automation.PSCredential]::Empty,
 
-        [ValidateNotNullOrEmpty()]
         [String[]]
         $Attributes = @("description"),
 
@@ -108,8 +412,8 @@ Function Get-LdapPassword {
         try {
             $searchString = "LDAP://$Server/RootDSE"
             $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-            $rootDN = $rootDSE.rootDomainNamingContext[0]
-            $adsPath = "LDAP://$Server/$rootDN"
+            $defaultNC = $rootDSE.defaultNamingContext[0]
+            $adsPath = "LDAP://$Server/$defaultNC"
         }
         catch {
             Write-Error "Domain controller unreachable" -ErrorAction Stop
@@ -185,101 +489,6 @@ Function Get-LdapPassword {
     }
 }
 
-Function Get-PasswordPolicy {
-<#
-.SYNOPSIS
-    Get password policies defined in an Active Directory domain.
-
-    Author: Timothee MENOCHET (@_tmenochet)
-
-.DESCRIPTION
-    Get-LdapPassword queries domain controller via LDAP protocol for default password policy as well as fine-grained password policies.
-
-.PARAMETER Server
-    Specifies the domain controller to query.
-
-.PARAMETER Credential
-    Specifies the domain account to use.
-
-.EXAMPLE
-    PS C:\> Get-PasswordPolicy -Server ADATUM.CORP -Credential ADATUM\testuser
-#>
-
-    [CmdletBinding()]
-    Param (
-        [ValidateNotNullOrEmpty()]
-        [String]
-        $Server = $Env:USERDNSDOMAIN,
-
-        [ValidateNotNullOrEmpty()]
-        [Management.Automation.PSCredential]
-        [Management.Automation.Credential()]
-        $Credential = [Management.Automation.PSCredential]::Empty
-    )
-
-    BEGIN {
-        try {
-            $searchString = "LDAP://$Server/RootDSE"
-            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-            $rootDN = $rootDSE.rootDomainNamingContext[0]
-            $adsPath = "LDAP://$Server/$rootDN"
-        }
-        catch {
-            Write-Error "Domain controller unreachable" -ErrorAction Stop
-        }
-    }
-
-    PROCESS {
-        # Enumerate domain password policy
-        $filter = '(objectClass=domain)'
-        $properties = 'distinguishedName','displayname','name','minPwdLength','minPwdAge','maxPwdAge','pwdHistoryLength','pwdProperties','lockoutDuration','lockoutThreshold','lockOutObservationWindow'
-        Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties -SearchScope 'Base' | ForEach-Object {
-            $complexityEnabled = $false
-            if ($_.pwdProperties -band 1) {
-                $complexityEnabled = $true
-            }
-            $reversibleEncryptionEnabled = $false
-            if ($_.pwdProperties -band 16) {
-                $reversibleEncryptionEnabled = $true
-            }
-            Write-Output ([pscustomobject] @{
-                DisplayName = 'Default Domain Policy'
-                DistinguishedName = $_.distinguishedName
-                AppliesTo = $_.name
-                MinPasswordLength = $_.minPwdLength
-                MinPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($_.minPwdAge)).ToString()
-                MaxPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($_.maxPwdAge)).ToString()
-                PasswordHistoryCount = $_.pwdHistoryLength
-                ComplexityEnabled = $complexityEnabled
-                ReversibleEncryptionEnabled = $reversibleEncryptionEnabled
-                LockoutThreshold = $_.lockoutThreshold
-                LockoutDuration = [TimeSpan]::FromTicks([Math]::ABS($_.lockoutDuration)).ToString()
-                LockOutObservationWindow = [TimeSpan]::FromTicks([Math]::ABS($_.lockOutObservationWindow)).ToString()
-            })
-        }
-
-        # Enumerate fine-grained password policies
-        $filter = '(objectClass=msDS-PasswordSettings)'
-        $properties = 'distinguishedName','displayname','msds-lockoutthreshold','msds-psoappliesto','msds-minimumpasswordlength','msds-passwordhistorylength','msds-lockoutobservationwindow','msds-lockoutduration','msds-minimumpasswordage','msds-maximumpasswordage','msds-passwordsettingsprecedence','msds-passwordcomplexityenabled','msds-passwordreversibleencryptionenabled'
-        Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
-            Write-Output ([pscustomobject] @{
-                DisplayName = $_.displayname
-                DistinguishedName = $_.distinguishedName
-                AppliesTo = $_.'msds-psoappliesto'
-                MinPasswordLength = $_.'msds-minimumpasswordlength'
-                MinPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-minimumpasswordage')).ToString()
-                MaxPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-maximumpasswordage')).ToString()
-                PasswordHistoryCount = $_.'msds-passwordhistorylength'
-                ComplexityEnabled = $_.'msds-passwordcomplexityenabled'
-                ReversibleEncryptionEnabled = $_.'msds-passwordreversibleencryptionenabled'
-                LockoutThreshold = $_.'msds-lockoutthreshold'
-                LockoutDuration = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-lockoutduration')).ToString()
-                LockOutObservationWindow = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-lockoutobservationwindow')).ToString()
-            })
-        }
-    }
-}
-
 Function Get-KerberoastableUser {
 <#
 .SYNOPSIS
@@ -318,8 +527,8 @@ Function Get-KerberoastableUser {
         try {
             $searchString = "LDAP://$Server/RootDSE"
             $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-            $rootDN = $rootDSE.rootDomainNamingContext[0]
-            $adsPath = "LDAP://$Server/$rootDN"
+            $defaultNC = $rootDSE.defaultNamingContext[0]
+            $adsPath = "LDAP://$Server/$defaultNC"
         }
         catch {
             Write-Error "Domain controller unreachable" -ErrorAction Stop
@@ -433,8 +642,8 @@ Function Get-KerberosDelegation {
         try {
             $searchString = "LDAP://$Server/RootDSE"
             $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-            $rootDN = $rootDSE.rootDomainNamingContext[0]
-            $adsPath = "LDAP://$Server/$rootDN"
+            $defaultNC = $rootDSE.defaultNamingContext[0]
+            $adsPath = "LDAP://$Server/$defaultNC"
         }
         catch {
             Write-Error "Domain controller unreachable" -ErrorAction Stop
@@ -507,133 +716,6 @@ Function Get-KerberosDelegation {
     }
 }
 
-Function Get-TrustRelationship {
-<#
-.SYNOPSIS
-    Enumerate trust relationships defined in an Active Directory domain.
-
-    Author: Timothee MENOCHET (@_tmenochet)
-
-.DESCRIPTION
-    Get-TrustRelationship queries domain controller via LDAP protocol for domain trusts.
-    It is a slightly modified version of PowerView's Get-DomainTrust by @harmj0y.
-
-.PARAMETER Server
-    Specifies the domain controller to query.
-
-.PARAMETER Credential
-    Specifies the domain account to use.
-
-.EXAMPLE
-    PS C:\> Get-TrustRelationship -Server ADATUM.CORP -Credential ADATUM\testuser
-#>
-
-    [CmdletBinding()]
-    Param (
-        [ValidateNotNullOrEmpty()]
-        [String]
-        $Server = $Env:USERDNSDOMAIN,
-
-        [ValidateNotNullOrEmpty()]
-        [Management.Automation.PSCredential]
-        [Management.Automation.Credential()]
-        $Credential = [Management.Automation.PSCredential]::Empty
-    )
-
-    BEGIN {
-        Function Get-SidFilteringStatus {
-            Param (
-                [int] $TrustDirection,
-                [uint32] $TrustAttributes
-            )
-
-            if ($TrustDirection -eq 0 -or $TrustDirection -eq 1 -or ($TrustAttributes -band 32) -or ($TrustAttributes -band 0x400) -or ($TrustAttributes -band 0x00400000) -or ($trustAttributes -band 0x00800000)) {
-                return "N/A"
-            }
-            if ($TrustAttributes -band 8) {
-                if ($TrustAttributes -band 4) {
-                    # quarantined
-                    return "Yes"
-                }
-                elseif ($TrustAttributes -band 64) {
-                    # forest trust migration
-                    return "No"
-                }
-                return "Yes"
-            }
-            elseif ($TrustAttributes -band 0x00800000) {
-                # obsolete tree root which
-                return "N/A"
-            }
-            else {
-                if ($TrustAttributes -band 4) {
-                    # quarantined
-                    return "Yes"
-                }
-                return "No"
-            }
-        }
-
-       $trustAttributes = @{
-            [uint32]'0x00000001' = 'NON_TRANSITIVE'
-            [uint32]'0x00000002' = 'UPLEVEL_ONLY'
-            [uint32]'0x00000004' = 'FILTER_SIDS'
-            [uint32]'0x00000008' = 'FOREST_TRANSITIVE'
-            [uint32]'0x00000010' = 'CROSS_ORGANIZATION'
-            [uint32]'0x00000020' = 'WITHIN_FOREST'
-            [uint32]'0x00000040' = 'TREAT_AS_EXTERNAL'
-            [uint32]'0x00000080' = 'TRUST_USES_RC4_ENCRYPTION'
-            [uint32]'0x00000100' = 'TRUST_USES_AES_KEYS'
-            [uint32]'0x00000200' = 'CROSS_ORGANIZATION_NO_TGT_DELEGATION'
-            [uint32]'0x00000400' = 'PIM_TRUST'
-        }
-
-        try {
-            $searchString = "LDAP://$Server/RootDSE"
-            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-            $rootDN = $rootDSE.rootDomainNamingContext[0]
-            $adsPath = "LDAP://$Server/CN=System,$rootDN"
-            $domain = $rootDN -replace 'DC=' -replace ',','.'
-        }
-        catch {
-            Write-Error "Domain controller unreachable" -ErrorAction Stop
-        }
-    }
-
-    PROCESS {
-        $filter = '(objectCategory=trustedDomain)'
-        $properties = 'distinguishedName','trustPartner','trustDirection','trustType','trustAttributes','whenCreated','whenChanged'
-        Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
-            $obj = $_
-            $trustType = Switch ($obj.trustType) {
-                1 { 'WINDOWS_NON_ACTIVE_DIRECTORY' }
-                2 { 'WINDOWS_ACTIVE_DIRECTORY' }
-                3 { 'MIT' }
-            }
-            $trustDirection = Switch ($obj.trustDirection) {
-                0 { 'Disabled' }
-                1 { 'Inbound' }
-                2 { 'Outbound' }
-                3 { 'Bidirectional' }
-            }
-            $trustAttrib = @()
-            $trustAttrib += $trustAttributes.Keys | Where-Object { $obj.trustAttributes -band $_ } | ForEach-Object { $trustAttributes[$_] }
-            $sidFiltering = Get-SidFilteringStatus -TrustDirection $obj.trustDirection -TrustAttributes $obj.trustAttributes
-
-            Write-Output ([pscustomobject] @{
-                TrusteeDomain       = $domain
-                TrustedDomain       = $obj.trustPartner
-                TrustType           = $trustType
-                TrustDirection      = $trustDirection
-                SidFiltering        = $sidFiltering
-                TrustAttribute      = $trustAttrib
-                WhenCreated         = $obj.whenCreated
-                WhenChanged         = $obj.whenChanged
-            })
-        }
-    }
-}
-
 Function Get-PrivExchangeStatus {
 <#
 .SYNOPSIS
@@ -670,8 +752,8 @@ Function Get-PrivExchangeStatus {
         try {
             $searchString = "LDAP://$Server/RootDSE"
             $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-            $rootDN = $rootDSE.rootDomainNamingContext[0]
-            $adsPath = "LDAP://$Server/$rootDN"
+            $defaultNC = $rootDSE.defaultNamingContext[0]
+            $adsPath = "LDAP://$Server/$defaultNC"
         }
         catch {
             Write-Error "Domain controller unreachable" -ErrorAction Stop
@@ -684,7 +766,7 @@ Function Get-PrivExchangeStatus {
         $objectSid = (Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter "(samAccountName=$groupId)" -Properties objectsid).objectsid
         $groupSid = (New-Object Security.Principal.SecurityIdentifier($objectSid, 0)).Value
         Write-Verbose "SID of the group 'Exchange Windows Permissions': $groupSid"
-        if ($groupSid -and (Get-LdapObjectAcl -ADSpath $adsPath -Credential $Credential -Filter "(DistinguishedName=$rootDN)" | ? { ($_.SecurityIdentifier -imatch "$groupSid") -and ($_.ActiveDirectoryRights -imatch 'WriteDacl') -and -not ($_.AceFlags -imatch 'InheritOnly') })) {
+        if ($groupSid -and (Get-LdapObjectAcl -ADSpath $adsPath -Credential $Credential -Filter "(DistinguishedName=$defaultNC)" | ? { ($_.SecurityIdentifier -imatch "$groupSid") -and ($_.ActiveDirectoryRights -imatch 'WriteDacl') -and -not ($_.AceFlags -imatch 'InheritOnly') })) {
             $privExchangeAcl = $true
         }
         Write-Output $privExchangeAcl
@@ -742,8 +824,8 @@ Function Get-ExchangeVersion {
         try {
             $searchString = "LDAP://$Server/RootDSE"
             $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-            $rootDN = $rootDSE.rootDomainNamingContext[0]
-            $adsPath = "LDAP://$Server/$rootDN"
+            $defaultNC = $rootDSE.defaultNamingContext[0]
+            $adsPath = "LDAP://$Server/$defaultNC"
         }
         catch {
             Write-Error "Domain controller unreachable" -ErrorAction Stop
@@ -754,8 +836,8 @@ Function Get-ExchangeVersion {
         $roleDictionary = @{2  = "MB"; 4  = "CAS"; 16 = "UM"; 32 = "HT"; 64 = "ET"}
         $properties = 'sAMAccountName', 'msExchCurrentServerRoles', 'networkAddress', 'versionNumber'
         $filter = "(|(objectClass=msExchExchangeServer)(objectClass=msExchClientAccessArray))"
-        $configurationNamingContext = $rootDSE.configurationNamingContext[0]
-        $exchangeServers = Get-LdapObject -ADSpath "LDAP://$Server/$configurationNamingContext" -Credential $Credential -Filter $filter -Properties $properties
+        $configurationNC = $rootDSE.configurationNamingContext[0]
+        $exchangeServers = Get-LdapObject -ADSpath "LDAP://$Server/$configurationNC" -Credential $Credential -Filter $filter -Properties $properties
         foreach ($exchServer in $exchangeServers) {
             $privExchange = $false
             $CVE20200688  = $false
@@ -837,8 +919,8 @@ Function Get-LegacyComputer {
         try {
             $searchString = "LDAP://$Server/RootDSE"
             $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-            $rootDN = $rootDSE.rootDomainNamingContext[0]
-            $adsPath = "LDAP://$Server/$rootDN"
+            $defaultNC = $rootDSE.defaultNamingContext[0]
+            $adsPath = "LDAP://$Server/$defaultNC"
         }
         catch {
             Write-Error "Domain controller unreachable" -ErrorAction Stop
@@ -1007,11 +1089,11 @@ Function Get-DnsRecord {
         try {
             $searchString = "LDAP://$Server/RootDSE"
             $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
-            $rootDN = $rootDSE.rootDomainNamingContext[0]
+            $defaultNC = $rootDSE.defaultNamingContext[0]
             if (-not $PSBoundParameters['ZoneName']) {
-                $ZoneName = $rootDN -replace 'DC=' -replace ',', '.'
+                $ZoneName = $defaultNC -replace 'DC=' -replace ',', '.'
             }
-            $adsPath = "LDAP://$Server/DC=$($ZoneName),CN=MicrosoftDNS,DC=DomainDnsZones,$rootDN"
+            $adsPath = "LDAP://$Server/DC=$($ZoneName),CN=MicrosoftDNS,DC=DomainDnsZones,$defaultNC"
         }
         catch {
             Write-Error "Domain controller unreachable" -ErrorAction Stop
