@@ -492,12 +492,12 @@ Function Get-LdapPassword {
 Function Get-KerberoastableUser {
 <#
 .SYNOPSIS
-    Get user accounts vulnerable to Kerberoast attack.
+    Get user accounts vulnerable to Kerberoast and ASREPRoast attacks.
 
     Author: Timothee MENOCHET (@_tmenochet)
 
 .DESCRIPTION
-    Get-KerberoastableUser queries domain controller via LDAP protocol for enabled user accounts configured with a SPN attribute.
+    Get-KerberoastableUser queries domain controller via LDAP protocol for enabled user accounts configured with a SPN attribute or a DONT_REQ_PREAUTH flag.
     For each account, information about password expiration, encryption type supported and granted privileges is also retrieved.
     It is a slightly modified version of RiskySPN's Find-PotentiallyCrackableAccounts by @machosec.
 
@@ -538,21 +538,29 @@ Function Get-KerberoastableUser {
     }
 
     PROCESS {
-        $properties = 'distinguishedname','samaccountname','displayname','serviceprincipalname','msDS-UserPasswordExpiryTimeComputed','msDS-SupportedEncryptionTypes','useraccountcontrol','msDS-AllowedToDelegateTo','memberof','pwdlastset'
-        $filter = "(&(!userAccountControl:1.2.840.113556.1.4.803:=2)(samAccountType=805306368)(servicePrincipalName=*)(!(samAccountName=krbtgt)))"
+        $properties = 'sAMAccountName','servicePrincipalName','msDS-UserPasswordExpiryTimeComputed','pwdLastSet','msDS-SupportedEncryptionTypes','userAccountControl','msDS-AllowedToDelegateTo','memberOf'
+        $filter = "(&(!userAccountControl:1.2.840.113556.1.4.803:=2)(samAccountType=805306368)(|(servicePrincipalName=*)(userAccountControl:1.2.840.113556.1.4.803:=4194304))(!(samAccountName=krbtgt)))"
         Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
-            [int32] $userAccountControl = $_.useraccountcontrol
+            [int32] $userAccountControl = $_.userAccountControl
+
+            # Kerberos preauthentication
+            $preauthNotRequired = $false
+            if ($userAccountControl -band 4194304) {
+                # DONT_REQ_PREAUTH
+                $preauthNotRequired = $true
+            }
 
             # Password policy
             $crackingWindow = "N/A"
-            if ($_.'msds-userpasswordexpirytimecomputed' -ne 9223372036854775807) {
-                $passwordExpiryDate = [datetime]::FromFileTime($_.'msds-userpasswordexpirytimecomputed')
+            if ($_.'msds-UserPasswordExpiryTimeComputed' -ne 9223372036854775807) {
+                $passwordExpiryDate = [datetime]::FromFileTime($_.'msds-UserPasswordExpiryTimeComputed')
                 $crackingWindow = $passwordExpiryDate.Subtract($currentDate).Days
             }
-            $passwordLastSet = [datetime]::FromFileTime($_.pwdlastset)
+            $passwordLastSet = [datetime]::FromFileTime($_.pwdLastSet)
             $passwordAge = $currentDate.Subtract($passwordLastSet).Days
             $isPasswordExpires = $true
             if ($userAccountControl -band 65536) {
+                # DONT_EXPIRE_PASSWD
                 $isPasswordExpires = $false
                 $crackingWindow = "Indefinitely"
             }
@@ -570,6 +578,7 @@ Function Get-KerberoastableUser {
             }
             else {
                 if ($userAccountControl -band 2097152) {
+                    # USE_DES_KEY_ONLY
                     $encType = "DES"
                 }
             }
@@ -592,13 +601,14 @@ Function Get-KerberoastableUser {
             }
 
             Write-Output ([pscustomobject] @{
-                sAMAccountName          = $_.samaccountname
-                ServicePrincipalName    = $_.serviceprincipalname
+                sAMAccountName          = $_.sAMAccountName
+                ServicePrincipalName    = $_.servicePrincipalName
+                IsPreauthRequired       = (-not $preauthNotRequired)
                 EncryptionType          = $encType
                 PasswordAge             = $passwordAge
                 IsPasswordExpires       = $isPasswordExpires
                 CrackingWindow          = $crackingWindow
-                MemberOf                = $_.memberof -replace "CN=" -replace ",.*"
+                MemberOf                = $_.memberOf -replace "CN=" -replace ",.*"
                 KerberosDelegation      = $kerberosDelegation
                 DelegationTargetService = $delegationTargetService
             })
