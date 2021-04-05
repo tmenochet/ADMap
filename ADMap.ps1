@@ -255,7 +255,7 @@ Function Get-PasswordPolicy {
     PROCESS {
         # Enumerate domain password policy
         $filter = '(objectClass=domain)'
-        $properties = 'distinguishedName','displayname','name','minPwdLength','minPwdAge','maxPwdAge','pwdHistoryLength','pwdProperties','lockoutDuration','lockoutThreshold','lockOutObservationWindow'
+        $properties = 'distinguishedName','displayname','name','minPwdLength','minPwdAge','maxPwdAge','pwdHistoryLength','pwdProperties','lockoutDuration','lockoutThreshold','lockoutObservationWindow'
         Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties -SearchScope 'Base' | ForEach-Object {
             $complexityEnabled = $false
             if ($_.pwdProperties -band 1) {
@@ -277,7 +277,7 @@ Function Get-PasswordPolicy {
                 ReversibleEncryptionEnabled = $reversibleEncryptionEnabled
                 LockoutThreshold = $_.lockoutThreshold
                 LockoutDuration = [TimeSpan]::FromTicks([Math]::ABS($_.lockoutDuration)).ToString()
-                LockOutObservationWindow = [TimeSpan]::FromTicks([Math]::ABS($_.lockOutObservationWindow)).ToString()
+                LockoutObservationWindow = [TimeSpan]::FromTicks([Math]::ABS($_.lockoutObservationWindow)).ToString()
             })
         }
 
@@ -297,7 +297,89 @@ Function Get-PasswordPolicy {
                 ReversibleEncryptionEnabled = $_.'msds-passwordreversibleencryptionenabled'
                 LockoutThreshold = $_.'msds-lockoutthreshold'
                 LockoutDuration = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-lockoutduration')).ToString()
-                LockOutObservationWindow = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-lockoutobservationwindow')).ToString()
+                LockoutObservationWindow = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-lockoutobservationwindow')).ToString()
+            })
+        }
+    }
+}
+
+Function Get-PotentiallyVoidPassword {
+<#
+.SYNOPSIS
+    Get user accounts allowed to have void password.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-PotentiallyVoidPassword queries domain controller via LDAP protocol for enabled user accounts configured with the flag UF_DONT_EXPIRE_PASSWD.
+    For each account, information about other UAC flags related to password is also retrieved.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.EXAMPLE
+    PS C:\> Get-PotentiallyVoidPassword -Server ADATUM.CORP -Credential ADATUM\testuser
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
+    )
+
+    BEGIN {
+        try {
+            $searchString = "LDAP://$Server/RootDSE"
+            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+            $defaultNC = $rootDSE.defaultNamingContext[0]
+            $adsPath = "LDAP://$Server/$defaultNC"
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
+    }
+
+    PROCESS {
+        $properties = 'sAMAccountName','whenCreated','pwdLastSet','userAccountControl'
+        $filter = "(&(!userAccountControl:1.2.840.113556.1.4.803:=2)(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=32))"
+        Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
+            [int32] $userAccountControl = $_.userAccountControl
+
+            $isPasswordExpires = $true
+            if ($userAccountControl -band 65536) {
+                # DONT_EXPIRE_PASSWD
+                $isPasswordExpires = $false
+            }
+
+            $isPasswordExpired = $false
+            if ($userAccountControl -band 8388608) {
+                # PASSWORD_EXPIRED
+                $isPasswordExpired = $true
+            }
+
+            $preauthNotRequired = $false
+            if ($userAccountControl -band 4194304) {
+                # DONT_REQ_PREAUTH
+                $preauthNotRequired = $true
+            }
+
+            Write-Output ([pscustomobject] @{
+                sAMAccountName          = $_.sAMAccountName
+                PasswordNotRequired     = $true
+                WhenCreated             = $_.whenCreated
+                PasswordLastSet         = [datetime]::FromFileTime($_.pwdLastSet)
+                IsPasswordExpires       = $isPasswordExpires
+                IsPasswordExpired       = $isPasswordExpired
+                IsPreauthRequired       = (-not $preauthNotRequired)
             })
         }
     }
@@ -497,7 +579,7 @@ Function Get-KerberoastableUser {
     Author: Timothee MENOCHET (@_tmenochet)
 
 .DESCRIPTION
-    Get-KerberoastableUser queries domain controller via LDAP protocol for enabled user accounts configured with a SPN attribute or a DONT_REQ_PREAUTH flag.
+    Get-KerberoastableUser queries domain controller via LDAP protocol for enabled user accounts configured with a SPN attribute or the flag UF_DONT_REQ_PREAUTH.
     For each account, information about password expiration, encryption type supported and granted privileges is also retrieved.
     It is a slightly modified version of RiskySPN's Find-PotentiallyCrackableAccounts by @machosec.
 
