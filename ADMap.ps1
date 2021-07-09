@@ -147,7 +147,7 @@ Function Get-TrustRelationship {
             }
         }
 
-       $trustAttributes = @{
+        $trustAttributes = @{
             [uint32]'0x00000001' = 'NON_TRANSITIVE'
             [uint32]'0x00000002' = 'UPLEVEL_ONLY'
             [uint32]'0x00000004' = 'FILTER_SIDS'
@@ -526,7 +526,7 @@ Function Get-LdapPassword {
         # Searching for encoded password attributes
         # Reference: https://www.blackhillsinfosec.com/domain-goodness-learned-love-ad-explorer/
         $filter = ''
-        $attributes = @("UnixUserPassword", "UserPassword", "msSFU30Password", "unicodePwd")
+        $attributes = @("UnixUserPassword", "UserPassword", "msSFU30Password", "unicodePwd", "os400-password")
         foreach ($attribute in $Attributes) {
             $filter += "($attribute=*)"
         }
