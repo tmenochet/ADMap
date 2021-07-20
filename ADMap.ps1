@@ -265,13 +265,20 @@ Function Get-PasswordPolicy {
             if ($_.pwdProperties -band 16) {
                 $reversibleEncryptionEnabled = $true
             }
+            $minPasswordAge = $_.minPwdAge
+            $maxPasswordAge = $_.maxPwdAge
+            try {
+                $minPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($minPasswordAge)).ToString()
+                $maxPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($maxPasswordAge)).ToString()
+            }
+            catch {}
             Write-Output ([pscustomobject] @{
                 DisplayName = 'Default Domain Policy'
                 DistinguishedName = $_.distinguishedName
                 AppliesTo = $_.name
                 MinPasswordLength = $_.minPwdLength
-                MinPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($_.minPwdAge)).ToString()
-                MaxPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($_.maxPwdAge)).ToString()
+                MinPasswordAge = $minPasswordAge
+                MaxPasswordAge = $maxPasswordAge
                 PasswordHistoryCount = $_.pwdHistoryLength
                 ComplexityEnabled = $complexityEnabled
                 ReversibleEncryptionEnabled = $reversibleEncryptionEnabled
@@ -285,13 +292,20 @@ Function Get-PasswordPolicy {
         $filter = '(objectClass=msDS-PasswordSettings)'
         $properties = 'distinguishedName','displayname','msds-lockoutthreshold','msds-psoappliesto','msds-minimumpasswordlength','msds-passwordhistorylength','msds-lockoutobservationwindow','msds-lockoutduration','msds-minimumpasswordage','msds-maximumpasswordage','msds-passwordsettingsprecedence','msds-passwordcomplexityenabled','msds-passwordreversibleencryptionenabled'
         Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
+            $minPasswordAge = $_.'msds-minimumpasswordage'
+            $maxPasswordAge = $_.'msds-maximumpasswordage'
+            try {
+                $minPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($minPasswordAge)).ToString()
+                $maxPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($maxPasswordAge)).ToString()
+            }
+            catch {}
             Write-Output ([pscustomobject] @{
                 DisplayName = $_.displayname
                 DistinguishedName = $_.distinguishedName
                 AppliesTo = $_.'msds-psoappliesto'
                 MinPasswordLength = $_.'msds-minimumpasswordlength'
-                MinPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-minimumpasswordage')).ToString()
-                MaxPasswordAge = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-maximumpasswordage')).ToString()
+                MinPasswordAge = $minPasswordAge
+                MaxPasswordAge = $maxPasswordAge
                 PasswordHistoryCount = $_.'msds-passwordhistorylength'
                 ComplexityEnabled = $_.'msds-passwordcomplexityenabled'
                 ReversibleEncryptionEnabled = $_.'msds-passwordreversibleencryptionenabled'
