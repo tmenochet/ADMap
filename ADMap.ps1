@@ -820,6 +820,83 @@ Function Get-KerberosDelegation {
     }
 }
 
+Function Get-VulnerableSchemaClass {
+<#
+.SYNOPSIS
+    Get vulnerable schema classes that can be used to create arbitrary objects.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-VulnerableSchemaClass queries a domain controller via LDAP protocol for vulnerable schema class.
+    It is a modified version of Find-VulnerableSchemas by @IISResetMe.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.EXAMPLE
+    PS C:\> Get-VulnerableSchemaClass -Server ADATUM.CORP -Credential ADATUM\testuser
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
+    )
+
+    BEGIN {
+        try {
+            $searchString = "LDAP://$Server/RootDSE"
+            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+            $schemaNC = $rootDSE.schemaNamingContext[0]
+            $adsPath = "LDAP://$Server/$schemaNC"
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
+    }
+
+    PROCESS {
+        $classSchemas = Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter '(objectClass=classSchema)' -Properties lDAPDisplayName,subClassOf,possSuperiors
+        $superClass = @{}
+        $classSchemas | ForEach-Object {
+            $superClass[$_.lDAPDisplayName] = $_.subClassOf
+        }
+        $classSchemas | Where-Object { ($_.possSuperiors -eq 'computer') -or ($_.possSuperiors -eq 'user') } | ForEach-Object {
+            $class = $cursor = $_.lDAPDisplayName
+            $vulnerableClass = $null
+            while ($superClass[$cursor] -notin 'top') {
+                if ($superClass[$cursor] -eq 'container') {
+                    $vulnerableClass = $class
+                    break
+                }
+                $cursor = $superClass[$cursor]
+            }
+            if ($vulnerableClass) {
+                if ($_.possSuperiors -eq 'computer') {
+                    $vulnerability = 'PossSuperiorComputer'
+                }
+                if ($_.possSuperiors -eq 'user') {
+                    $vulnerability = 'PossSuperiorUser'
+                }
+                Write-Output ([pscustomobject] @{
+                    Vulnerability = $vulnerability
+                    Classes = $vulnerableClass
+                })
+            }
+        }
+    }
+}
+
 Function Get-PrivExchangeStatus {
 <#
 .SYNOPSIS

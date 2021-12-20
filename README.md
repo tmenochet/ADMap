@@ -12,6 +12,7 @@ Get-PotentiallyVoidPassword     -   gets user accounts allowed to have void pass
 Get-LdapPassword                -   gets plaintext passwords from a given Active Directory domain
 Get-KerberoastableUser          -   gets user accounts vulnerable to Kerberoast and ASREPRoast attacks
 Get-KerberosDelegation          -   enumerates enabled accounts granted with Kerberos delegation
+Get-VulnerableSchemaClass       -   gets vulnerable schema classes that can be used to create arbitrary objects
 Get-PrivExchangeStatus          -   gets PrivExchange exploitability regarding to Active Directory ACL
 Get-ExchangeVersion             -   enumerates Exchange servers from Active Directory and check for exploitable vulnerabilities
 Get-LegacyComputer              -   enumerates outdated Windows computers in a given Active Directory domain
