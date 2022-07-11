@@ -216,7 +216,7 @@ Function Get-PasswordPolicy {
     Author: Timothee MENOCHET (@_tmenochet)
 
 .DESCRIPTION
-    Get-LdapPassword queries domain controller via LDAP protocol for default password policy as well as fine-grained password policies.
+    Get-PasswordPolicy queries domain controller via LDAP protocol for default password policy as well as fine-grained password policies.
 
 .PARAMETER Server
     Specifies the domain controller to query.
@@ -497,8 +497,8 @@ Function Get-LdapPassword {
                 [string] $Password
             )
             $ntHash = New-Object byte[] 16
-            $unicodePassword = New-Object Win32+UNICODE_STRING $Password
-            [Win32]::RtlCalculateNtOwfPassword([ref] $unicodePassword, $ntHash) | Out-Null
+            $unicodePassword = New-Object ADMap.Win32+UNICODE_STRING $Password
+            [ADMap.Win32]::RtlCalculateNtOwfPassword([ref] $unicodePassword, $ntHash) | Out-Null
             $unicodePassword.Dispose()
             return (($ntHash | ForEach-Object ToString X2) -join '')
         }
@@ -1064,6 +1064,80 @@ Function Get-ExchangeVersion {
     }
 }
 
+Function Get-ADCSServer {
+<#
+.SYNOPSIS
+    Enumerate Active Directory Certificate Services.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-ADCSServer queries domain controller via LDAP protocol for PKI enrollment services.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.EXAMPLE
+    PS C:\> Get-ADCSServer -Server ADATUM.CORP -Credential ADATUM\testuser
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
+    )
+
+    BEGIN {
+        try {
+            $searchString = "LDAP://$Server/RootDSE"
+            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+            $configurationNC = $rootDSE.configurationNamingContext[0]
+            $defaultNC = $rootDSE.defaultNamingContext[0]
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
+    }
+
+    PROCESS {
+        # Get CA info
+        $adsPath = "LDAP://$Server/$configurationNC"
+        $filter = '(objectClass=pKIEnrollmentService)'
+        $properties = 'cn', 'certificatetemplates', 'dnsHostname'
+        Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
+            $certificateAuthority = $_.cn
+            $certificateTemplates = $_.certificateTemplates
+            $computerName = $_.dnsHostname
+            $cn = $computerName.split(".")[0]
+            # Get server info
+            $adsPath = "LDAP://$Server/$defaultNC"
+            $filter = "(&(samAccountType=805306369)(cn=$cn))"
+            $properties = 'samAccountName', 'operatingSystem', 'operatingSystemVersion', 'operatingSystemServicePack', 'LastLogon'
+            Get-LdapObject -ADSpath $adsPath -Credential $Credential -Filter $filter -Properties * | ForEach-Object {
+                Write-Output ([pscustomobject] @{
+                    CertificateAuthority = $certificateAuthority
+                    CertificateTemplates = $certificateTemplates
+                    CAServer = $computerName
+                    SamAccountName = $_.samAccountName
+                    OperatingSystem = $_.operatingSystem
+                    Version = $_.operatingSystemVersion
+                    ServicePack = $_.operatingSystemServicePack
+                    LastLogon = ([datetime]::FromFileTime(($_.LastLogon)))
+                })
+            }
+        }
+    }
+}
+
 Function Get-LegacyComputer {
 <#
 .SYNOPSIS
@@ -1433,25 +1507,27 @@ Function Local:Get-LdapObjectAcl {
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-public class Win32 {
-    [DllImport("advapi32.dll", SetLastError = true, EntryPoint = "SystemFunction007", CharSet = CharSet.Unicode)]
-    public static extern int RtlCalculateNtOwfPassword(ref UNICODE_STRING password, [MarshalAs(UnmanagedType.LPArray)] byte[] hash);
+namespace ADMap {
+    public class Win32 {
+        [DllImport("advapi32.dll", SetLastError = true, EntryPoint = "SystemFunction007", CharSet = CharSet.Unicode)]
+        public static extern int RtlCalculateNtOwfPassword(ref UNICODE_STRING password, [MarshalAs(UnmanagedType.LPArray)] byte[] hash);
 
-    [StructLayout(LayoutKind.Sequential)]
-    public struct UNICODE_STRING : IDisposable {
-        public ushort Length;
-        public ushort MaximumLength;
-        public IntPtr buffer;
+        [StructLayout(LayoutKind.Sequential)]
+        public struct UNICODE_STRING : IDisposable {
+            public ushort Length;
+            public ushort MaximumLength;
+            public IntPtr buffer;
 
-        public UNICODE_STRING(string s) {
-            Length = (ushort)(s.Length * 2);
-            MaximumLength = (ushort)(Length + 2);
-            buffer = Marshal.StringToHGlobalUni(s);
-        }
+            public UNICODE_STRING(string s) {
+                Length = (ushort)(s.Length * 2);
+                MaximumLength = (ushort)(Length + 2);
+                buffer = Marshal.StringToHGlobalUni(s);
+            }
 
-        public void Dispose() {
-            Marshal.FreeHGlobal(buffer);
-            buffer = IntPtr.Zero;
+            public void Dispose() {
+                Marshal.FreeHGlobal(buffer);
+                buffer = IntPtr.Zero;
+            }
         }
     }
 }
