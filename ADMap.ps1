@@ -315,15 +315,15 @@ Function Get-PasswordPolicy {
     }
 }
 
-Function Get-PotentiallyVoidPassword {
+Function Get-PotentiallyEmptyPassword {
 <#
 .SYNOPSIS
-    Get user accounts allowed to have void password.
+    Get user accounts allowed to have empty password.
 
     Author: Timothee MENOCHET (@_tmenochet)
 
 .DESCRIPTION
-    Get-PotentiallyVoidPassword queries domain controller via LDAP protocol for enabled user accounts configured with the flag UF_DONT_EXPIRE_PASSWD.
+    Get-PotentiallyEmptyPassword queries domain controller via LDAP protocol for enabled user accounts configured with the UF_DONT_EXPIRE_PASSWD flag.
     For each account, information about other UAC flags related to password is also retrieved.
 
 .PARAMETER Server
@@ -333,7 +333,7 @@ Function Get-PotentiallyVoidPassword {
     Specifies the domain account to use.
 
 .EXAMPLE
-    PS C:\> Get-PotentiallyVoidPassword -Server ADATUM.CORP -Credential ADATUM\testuser
+    PS C:\> Get-PotentiallyEmptyPassword -Server ADATUM.CORP -Credential ADATUM\testuser
 #>
 
     [CmdletBinding()]

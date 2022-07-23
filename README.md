@@ -8,7 +8,7 @@ ADMap is a PowerShell tool for Active Directory reconnaissance.
 Get-DomainInfo                  -   gets basic information about a given Active Directory domain
 Get-TrustRelationship           -   enumerates trust relationships defined in a given Active Directory domain
 Get-PasswordPolicy              -   gets password policies defined in a given Active Directory domain
-Get-PotentiallyVoidPassword     -   gets user accounts allowed to have void password
+Get-PotentiallyEmptyPassword    -   gets user accounts allowed to have an empty password
 Get-LdapPassword                -   gets plaintext passwords from a given Active Directory domain
 Get-KerberoastableUser          -   gets user accounts vulnerable to Kerberoast and ASREPRoast attacks
 Get-KerberosDelegation          -   enumerates enabled accounts granted with Kerberos delegation
