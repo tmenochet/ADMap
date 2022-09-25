@@ -18,4 +18,5 @@ Get-ExchangeVersion             -   enumerates Exchange servers from Active Dire
 Get-ADCSServer                  -   enumerates ADCS Certificate Authority servers from Active Directory
 Get-LegacyComputer              -   enumerates outdated Windows computers in a given Active Directory domain
 Get-DnsRecord                   -   enumerates Active Directory-Integrated DNS records for a given zone
+Get-DomainSubnet                -   gets subnets defined in a given Active Directory domain
 ```

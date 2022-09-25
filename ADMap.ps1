@@ -1377,6 +1377,86 @@ Function Get-DnsRecord {
     }
 }
 
+Function Get-DomainSubnet {
+<#
+.SYNOPSIS
+    Get subnets from an Active Directory domain.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-DomainSubnet queries domain controller via LDAP protocol for subnet objects related to site objects.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.PARAMETER Site
+    Specifies a target site to search for.
+
+.EXAMPLE
+    PS C:\> Get-DomainSubnet -Server ADATUM.CORP -Credential ADATUM\testuser
+
+.EXAMPLE
+    PS C:\> Get-DomainSubnet -Site 'Default-First-Site-Name'
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty,
+
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Site
+    )
+
+    Begin {
+        try {
+            $searchString = "LDAP://$Server/RootDSE"
+            $rootDSE = New-Object DirectoryServices.DirectoryEntry($searchString, $null, $null)
+            $configurationNC = $rootDSE.configurationNamingContext[0]
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
+    }
+
+    Process {
+        $filter = "(objectCategory=subnet)"
+        if ($Site) {
+            $filter = "(&(objectClass=site)(name=$Site))"
+            if ($siteDn = (Get-LdapObject -ADSpath "LDAP://$Server/$configurationNC" -Credential $Credential -Filter $filter -Properties 'distinguishedName').distinguishedName) {
+                $filter = "(&(objectCategory=subnet)(siteObject=$siteDn))"
+            }
+            else {
+                Write-Error "Site $Site does not exist" -ErrorAction Stop
+            }
+        }
+        $properties = 'name', 'siteObject', 'description'
+        Get-LdapObject -ADSpath "LDAP://$Server/$configurationNC" -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
+            if (-not $Site) {
+                $Site = $_.siteObject -replace ",CN=Sites,$configurationNC" -replace "CN="
+            }
+            Write-Output ([pscustomobject] @{
+                Site = $Site
+                Subnet = $_.name
+                Description = $_.description
+            })
+        }
+    }
+
+    End {}
+}
+
 Function Local:Get-LdapObject {
     Param (
         [Parameter(Mandatory=$true)]
