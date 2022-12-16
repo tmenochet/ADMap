@@ -1443,11 +1443,8 @@ Function Get-DomainSubnet {
         }
         $properties = 'name', 'siteObject', 'description'
         Get-LdapObject -ADSpath "LDAP://$Server/$configurationNC" -Credential $Credential -Filter $filter -Properties $properties | ForEach-Object {
-            if (-not $Site) {
-                $Site = $_.siteObject -replace ",CN=Sites,$configurationNC" -replace "CN="
-            }
             Write-Output ([pscustomobject] @{
-                Site = $Site
+                Site = $_.siteObject -replace ",CN=Sites,$configurationNC" -replace "CN="
                 Subnet = $_.name
                 Description = $_.description
             })
