@@ -12,7 +12,7 @@ Function Get-DomainInfo {
     Specifies the domain controller to query.
 
 .PARAMETER SSL
-    Use SSL connection to LDAP Server.
+    Use SSL connection to LDAP server.
 
 .PARAMETER Credential
     Specifies the domain account to use.
@@ -1525,7 +1525,7 @@ Function Local:Get-LdapRootDSE {
 
     $searchString = "LDAP://$Server/RootDSE"
     if ($SSL) {
-        # Note that the server certificate have to be trusted
+        # Note that the server certificate has to be trusted
         $authType = [DirectoryServices.AuthenticationTypes]::SecureSocketsLayer
     }
     else {
@@ -1549,7 +1549,7 @@ Function Local:Get-LdapObject {
         [String]
         $SearchBase,
 
-        [ValidateNotNullOrEmpty()]
+        [ValidateSet('Base', 'OneLevel', 'Subtree')]
         [String]
         $SearchScope = 'Subtree',
 
@@ -1589,12 +1589,9 @@ Function Local:Get-LdapObject {
             else {
                 $searcher.Bind()
             }
-            $request = New-Object -TypeName System.DirectoryServices.Protocols.SearchRequest
-            $request.DistinguishedName = $SearchBase
-            $request.Scope = $SearchScope
+            $request = New-Object -TypeName System.DirectoryServices.Protocols.SearchRequest($SearchBase, $Filter, $SearchScope, $Properties)
             $pageRequestControl = New-Object -TypeName System.DirectoryServices.Protocols.PageResultRequestControl -ArgumentList $PageSize
             $request.Controls.Add($pageRequestControl) | Out-Null
-            $request.Filter = $Filter
             $response = $searcher.SendRequest($request)
             while ($true) {
                 $response = $searcher.SendRequest($request)
@@ -1686,7 +1683,7 @@ Function Local:Get-LdapObjectAcl {
         [String]
         $SearchBase,
 
-        [ValidateNotNullOrEmpty()]
+        [ValidateSet('Base', 'OneLevel', 'Subtree')]
         [String]
         $SearchScope = 'Subtree',
 
