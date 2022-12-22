@@ -844,6 +844,99 @@ Function Get-KerberosDelegation {
     }
 }
 
+Function Get-ServicePrincipal {
+<#
+.SYNOPSIS
+    Discover enabled Kerberos services by searching for SPNs.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-ServicePrincipal queries domain controller via LDAP protocol for SPNs matching criteria.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER SSL
+    Use SSL connection to LDAP server.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.PARAMETER ServiceType
+    Specifies SPN service codes to filter for.
+
+.EXAMPLE
+    PS C:\> Get-ServicePrincipal -Server ADATUM.CORP -ServiceType MSSQL
+#>
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [Switch]
+        $SSL,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty,
+
+        [ValidateNotNullOrEmpty()]
+        [string[]]
+        $ServiceType = ''
+    )
+
+    # Get SPNs
+    $properties = 'sAMAccountName','servicePrincipalName','lastLogon','description','objectCategory'
+    $filter = ''
+    foreach ($type in $ServiceType) {
+        $filter += "(servicePrincipalName=$type*)"
+    }
+    $filter = "(&(!userAccountControl:1.2.840.113556.1.4.803:=2)(|$filter))"
+    $results = Get-LdapObject -Server $Server -Filter $filter -Properties $properties -Credential $Credential
+    $results | ForEach-Object {
+        foreach ($spn in $($_.serviceprincipalname)) {
+            # Parse SPNs
+            $spnService = $spn.split('/')[0]
+            $spnServer = $spn.split('/')[1].split(':')[0].split(' ')[0]
+            if ($spnPort = $spn.split('/')[1].split(':')[1]) {
+                $spnPort = $spnPort.split(' ')[0]
+            }
+            else {
+                $spnPort = '(default)'
+            }
+            # Skip SPN values which does not match query
+            $found = $false
+            $ServiceType | ForEach-Object {if ($spnService -like "$_*") {$found = $true}}
+            if (-not $found) {
+                continue
+            }
+            # Parse object category
+            $accountCategory = $($_.objectcategory).split('=')[1].split(',')[0]
+            # Parse last logon
+            if ($_.lastlogon) {
+                $lastLogon = [datetime]::FromFileTime([string] $_.lastlogon).ToString('g')
+            }
+            else {
+                $lastLogon = ''
+            }
+
+            Write-Output ([pscustomobject] @{
+                sAMAccountName       = $_.samaccountname
+                AccountCategory      = $accountCategory
+                LastLogon            = $lastLogon
+                Description          = $_.description
+                ServicePrincipalName = $spn
+                ComputerName         = $spnServer
+                Port                 = $spnPort
+                ServiceType          = $spnService
+            })
+        }
+    }
+}
+
 Function Get-VulnerableSchemaClass {
 <#
 .SYNOPSIS
@@ -988,7 +1081,7 @@ Function Get-PrivExchangeStatus {
     }
 }
 
-Function Get-ExchangeVersion {
+Function Get-ExchangeServer {
 <#
 .SYNOPSIS
     Enumerate Exchange servers from Active Directory and check for exploitable vulnerabilities.
@@ -996,7 +1089,7 @@ Function Get-ExchangeVersion {
     Author: Timothee MENOCHET (@_tmenochet)
 
 .DESCRIPTION
-    Get-ExchangeVersion queries domain controller via LDAP protocol for Exchange information.
+    Get-ExchangeServer queries domain controller via LDAP protocol for Exchange information.
 
 .PARAMETER Server
     Specifies the domain controller to query.
@@ -1008,7 +1101,7 @@ Function Get-ExchangeVersion {
     Specifies the domain account to use.
 
 .EXAMPLE
-    PS C:\> Get-ExchangeVersion -Server ADATUM.CORP -Credential ADATUM\testuser
+    PS C:\> Get-ExchangeServer -Server ADATUM.CORP -Credential ADATUM\testuser
 #>
 
     [CmdletBinding()]
@@ -1153,7 +1246,7 @@ Function Get-ADCSServer {
     Process {
         # Get CA info
         $filter = '(objectClass=pKIEnrollmentService)'
-        $properties = 'cn', 'certificatetemplates', 'dnsHostname'
+        $properties = 'cn', 'certificatetemplates', 'dnsHostname', 'msPKI-Enrollment-Servers'
         Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $configurationNC -Filter $filter -Properties $properties -Credential $Credential | ForEach-Object {
             $certificateAuthority = $_.cn
             $certificateTemplates = $_.certificateTemplates
@@ -1166,6 +1259,7 @@ Function Get-ADCSServer {
                 Write-Output ([pscustomobject] @{
                     CertificateAuthority = $certificateAuthority
                     CertificateTemplates = $certificateTemplates
+                    EnrollmentWebService = $_.'msPKI-Enrollment-Servers'
                     CAServer = $computerName
                     SamAccountName = $_.samAccountName
                     OperatingSystem = $_.operatingSystem
@@ -1558,12 +1652,12 @@ Function Local:Get-LdapObject {
             # Get default naming context
             try {
                 $rootDSE = Get-LdapRootDSE -Server $Server
+                $defaultNC = $rootDSE.defaultNamingContext[0]
             }
             catch {
                 Write-Error "Domain controller unreachable"
                 continue
             }
-            $defaultNC = $rootDSE.defaultNamingContext[0]
             if (-not $SearchBase) {
                 $SearchBase = $defaultNC
             }
@@ -1721,12 +1815,12 @@ Function Local:Get-LdapObjectAcl {
             # Get default naming context
             try {
                 $rootDSE = Get-LdapRootDSE -Server $Server
+                $defaultNC = $rootDSE.defaultNamingContext[0]
             }
             catch {
                 Write-Error "Domain controller unreachable"
                 continue
             }
-            $defaultNC = $rootDSE.defaultNamingContext[0]
             if (-not $SearchBase) {
                 $SearchBase = $defaultNC
             }
