@@ -60,7 +60,7 @@ Function Get-DomainInfo {
 
     Process {
         $filter = '(objectClass=domain)'
-        $properties = 'name','objectsid','ms-ds-machineaccountquota'
+        $properties = 'name','objectsid','ms-ds-machineaccountquota','whenCreated'
         $domain = Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $defaultNC -SearchScope 'Base' -Filter $filter -Properties $properties -Credential $Credential
 
         $filter = '(objectClass=site)'
@@ -81,6 +81,7 @@ Function Get-DomainInfo {
             GlobalCatalogs                  = $globalCatalogs
             Sites                           = $sites
             MachineAccountQuota             = $domain.'ms-ds-machineaccountquota'
+            WhenCreated                     = $domain.whenCreated
         })
     }
 }
@@ -387,7 +388,7 @@ Function Get-PotentiallyEmptyPassword {
         $Credential = [Management.Automation.PSCredential]::Empty
     )
 
-    $properties = 'sAMAccountName','whenCreated','pwdLastSet','userAccountControl'
+    $properties = 'distinguishedName','sAMAccountName','whenCreated','pwdLastSet','userAccountControl'
     $filter = "(&(!userAccountControl:1.2.840.113556.1.4.803:=2)(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=32))"
     Get-LdapObject -Server $Server -SSL:$SSL -Filter $filter -Properties $properties -Credential $Credential | ForEach-Object {
         [int32] $userAccountControl = $_.userAccountControl
@@ -412,6 +413,7 @@ Function Get-PotentiallyEmptyPassword {
 
         Write-Output ([pscustomobject] @{
             sAMAccountName          = $_.sAMAccountName
+            DistinguishedName       = $_.distinguishedName
             PasswordNotRequired     = $true
             WhenCreated             = $_.whenCreated
             PasswordLastSet         = [datetime]::FromFileTime($_.pwdLastSet)
@@ -652,7 +654,7 @@ Function Get-KerberoastableUser {
         $Credential = [Management.Automation.PSCredential]::Empty
     )
 
-    $properties = 'sAMAccountName','servicePrincipalName','msDS-UserPasswordExpiryTimeComputed','pwdLastSet','msDS-SupportedEncryptionTypes','userAccountControl','msDS-AllowedToDelegateTo','memberOf'
+    $properties = 'distinguishedName','sAMAccountName','servicePrincipalName','msDS-UserPasswordExpiryTimeComputed','pwdLastSet','msDS-SupportedEncryptionTypes','userAccountControl','msDS-AllowedToDelegateTo','memberOf'
     $filter = "(&(!userAccountControl:1.2.840.113556.1.4.803:=2)(samAccountType=805306368)(|(servicePrincipalName=*)(userAccountControl:1.2.840.113556.1.4.803:=4194304))(!(samAccountName=krbtgt)))"
     Get-LdapObject -Server $Server -SSL:$SSL -Filter $filter -Properties $properties -Credential $Credential | ForEach-Object {
         [int32] $userAccountControl = $_.userAccountControl
@@ -717,6 +719,7 @@ Function Get-KerberoastableUser {
 
         Write-Output ([pscustomobject] @{
             sAMAccountName          = $_.sAMAccountName
+            DistinguishedName       = $_.distinguishedname
             ServicePrincipalName    = $_.servicePrincipalName
             IsPreauthRequired       = (-not $preauthNotRequired)
             EncryptionType          = $encType
