@@ -9,6 +9,7 @@ Get-DomainInfo                  -   gets basic information about a given Active 
 Get-TrustRelationship           -   gets trust relationships defined in a given Active Directory domain
 Get-PasswordPolicy              -   gets password policies defined in a given Active Directory domain
 Get-PotentiallyEmptyPassword    -   gets user accounts allowed to have an empty password
+Get-PreCreatedComputer          -   gets computer accounts that have never been used (password may be the hostname or empty)
 Get-LdapPassword                -   discovers plaintext passwords from a given Active Directory domain
 Get-KerberoastableUser          -   gets user accounts vulnerable to Kerberoast and ASREPRoast attacks
 Get-KerberosDelegation          -   gets accounts granted with Kerberos delegation

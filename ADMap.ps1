@@ -424,6 +424,83 @@ Function Get-PotentiallyEmptyPassword {
     }
 }
 
+Function Get-PreCreatedComputer {
+<#
+.SYNOPSIS
+    Get computer accounts that have never been used.
+    If the option "Assign this computer account as a pre-Windows 2000 computer" is set for a computer account, its password is the computer name in lowercase and must be changed at next logon.
+    If a computer account was created with the legacy tool dsadd, its password is empty. 
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-PreCreatedComputer queries domain controller via LDAP protocol for enabled computer accounts configured with the flags "UF_DONT_EXPIRE_PASSWD" and "WORKSTATION_TRUST_ACCOUNT".
+    For each account, information about other UAC flags related to password is also retrieved.
+    If you find a computer account that has never been used, you should try the computer name in lowercase as the password or a blank password.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER SSL
+    Use SSL connection to LDAP Server.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.EXAMPLE
+    PS C:\> Get-PreCreatedComputer -Server ADATUM.CORP -Credential ADATUM\testuser
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [Switch]
+        $SSL,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
+    )
+
+    $properties = 'distinguishedName','sAMAccountName','whenCreated','userAccountControl'
+    $filter = "(&(!userAccountControl:1.2.840.113556.1.4.803:=2)(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=32)(userAccountControl:1.2.840.113556.1.4.803:=4096)(logonCount=0))"
+    Get-LdapObject -Server $Server -SSL:$SSL -Filter $filter -Properties $properties -Credential $Credential | ForEach-Object {
+        [int32] $userAccountControl = $_.userAccountControl
+
+        $isPasswordExpires = $true
+        if ($userAccountControl -band 65536) {
+            # DONT_EXPIRE_PASSWD
+            $isPasswordExpires = $false
+        }
+
+        $isPasswordExpired = $false
+        if ($userAccountControl -band 8388608) {
+            # PASSWORD_EXPIRED
+            $isPasswordExpired = $true
+        }
+
+        $preauthNotRequired = $false
+        if ($userAccountControl -band 4194304) {
+            # DONT_REQ_PREAUTH
+            $preauthNotRequired = $true
+        }
+
+        Write-Output ([pscustomobject] @{
+            sAMAccountName          = $_.sAMAccountName
+            DistinguishedName       = $_.distinguishedName
+            WhenCreated             = $_.whenCreated
+            PasswordNotRequired     = $true
+            IsPasswordExpires       = $isPasswordExpires
+            IsPasswordExpired       = $isPasswordExpired
+            IsPreauthRequired       = (-not $preauthNotRequired)
+        })
+    }
+}
+
 Function Get-LdapPassword {
 <#
 .SYNOPSIS
