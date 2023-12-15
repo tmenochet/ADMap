@@ -18,7 +18,8 @@ Get-VulnerableSchemaClass       -   checks for vulnerable schema classes that ca
 Get-PrivExchangeStatus          -   checks PrivExchange exploitability regarding to Active Directory ACL
 Get-ExchangeServer              -   gets Exchange servers from Active Directory and check for exploitable vulnerabilities
 Get-ADCSServer                  -   gets ADCS Certificate Authority servers from Active Directory
+Get-SCCMServer                  -   gets SCCM servers from Active Directory
 Get-LegacyComputer              -   gets outdated Windows computers in a given Active Directory domain
-Get-DnsRecord                   -   gets Active Directory-Integrated DNS records for a given zone
+Get-DomainDnsRecord             -   gets Active Directory-Integrated DNS records for a given zone
 Get-DomainSubnet                -   gets subnets defined in a given Active Directory domain
 ```

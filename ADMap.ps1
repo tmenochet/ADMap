@@ -1352,6 +1352,69 @@ Function Get-ADCSServer {
     }
 }
 
+Function Get-SCCMServer {
+<#
+.SYNOPSIS
+    Enumerate SCCM servers from Active Directory.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-SCCMServer queries domain controller via LDAP protocol for published SCCM Management Points.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER SSL
+    Use SSL connection to LDAP Server.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.EXAMPLE
+    PS C:\> Get-SCCMServer -Server ADATUM.CORP -Credential ADATUM\testuser
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [Switch]
+        $SSL,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
+    )
+
+    Begin {
+        try {
+            $rootDSE = Get-LdapRootDSE -Server $Server
+            $defaultNC = $rootDSE.defaultNamingContext[0]
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
+    }
+
+    Process {
+        $filter = '(objectClass=mSSMSManagementPoint)'
+        $properties = 'dnsHostname', 'mSSMSSiteCode', 'mSSMSMPName', 'mSSMSDefaultMP', 'mSSMSDeviceManagementPoint'
+        Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $defaultNC -Filter $filter -Properties $properties -Credential $Credential | ForEach-Object {
+            Write-Output ([pscustomobject] @{
+                Fqdn = $_.dnsHostname
+                mSSMSSiteCode = $_.mSSMSSiteCode
+                mSSMSMPName = $_.mSSMSDefaultMP
+                mSSMSDefaultMP = $_.mSSMSDefaultMP
+                mSSMSDeviceManagementPoint = $_.mSSMSDeviceManagementPoint
+            })
+        }
+    }
+}
+
 Function Get-LegacyComputer {
 <#
 .SYNOPSIS
@@ -1409,7 +1472,7 @@ Function Get-LegacyComputer {
     }
 }
 
-Function Get-DnsRecord {
+Function Get-DomainDnsRecord {
 <#
 .SYNOPSIS
     Get Active Directory-Integrated DNS (ADIDNS) records for a given zone.
@@ -1417,7 +1480,7 @@ Function Get-DnsRecord {
     Author: Timothee MENOCHET (@_tmenochet)
 
 .DESCRIPTION
-    Get-DnsRecord queries domain controller via LDAP protocol for DNS records.
+    Get-DomainDnsRecord queries domain controller via LDAP protocol for DNS records.
     It is a slightly modified version of PowerView's Get-DomainDNSRecord by @harmj0y.
 
 .PARAMETER Server
@@ -1433,7 +1496,7 @@ Function Get-DnsRecord {
     Specifies the DNS zone to query for records, defaults to Active Directory domain.
 
 .EXAMPLE
-    PS C:\> Get-DnsRecord -Server DC.ADATUM.CORP -Credential ADATUM\testuser
+    PS C:\> Get-DomainDnsRecord -Server DC.ADATUM.CORP -Credential ADATUM\testuser
 #>
 
     [CmdletBinding()]
