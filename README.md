@@ -16,10 +16,11 @@ Get-KerberosDelegation          -   gets accounts granted with Kerberos delegati
 Get-ServicePrincipal            -   discovers Kerberos services by searching for SPNs
 Get-VulnerableSchemaClass       -   checks for vulnerable schema classes that can be used to create arbitrary objects
 Get-PrivExchangeStatus          -   checks PrivExchange exploitability regarding to Active Directory ACL
-Get-ExchangeServer              -   gets Exchange servers from Active Directory and check for exploitable vulnerabilities
-Get-ADCSServer                  -   gets ADCS Certificate Authority servers from Active Directory
-Get-SCCMServer                  -   gets SCCM servers from Active Directory
-Get-LegacyComputer              -   gets outdated Windows computers in a given Active Directory domain
+Get-ExchangeServer              -   gets Exchange servers from a given Active Directory domain and check for exploitable vulnerabilities
+Get-ADCSServer                  -   gets ADCS Certificate Authority servers from a given Active Directory domain
+Get-ADCSCertificateTemplate     -   gets ADCS certificate templates from a given Active Directory domain and check for exploitable vulnerabilities
+Get-SCCMServer                  -   gets SCCM servers from a given Active Directory domain
+Get-LegacyComputer              -   gets outdated Windows computers from a given Active Directory domain
 Get-DomainDnsRecord             -   gets Active Directory-Integrated DNS records for a given zone
 Get-DomainSubnet                -   gets subnets defined in a given Active Directory domain
 ```

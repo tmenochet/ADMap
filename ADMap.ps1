@@ -860,7 +860,7 @@ Function Get-KerberosDelegation {
 
     Process {
         $filter = '(&(!userAccountControl:1.2.840.113556.1.4.803:=2)(|(userAccountControl:1.2.840.113556.1.4.803:=524288)(userAccountControl:1.2.840.113556.1.4.803:=16777216)(msDS-AllowedToDelegateTo=*)(msDS-AllowedToActOnBehalfOfOtherIdentity=*)))'
-        $properties = 'distinguishedName','sAMAccountName','objectCategory','userAccountControl','msDS-AllowedToActOnBehalfOfOtherIdentity','lastLogon','servicePrincipalName','operatingSystem','operatingSystemVersion','operatingSystemServicePack'
+        $properties = 'distinguishedName','sAMAccountName','objectSid','objectCategory','userAccountControl','msDS-AllowedToActOnBehalfOfOtherIdentity','lastLogon','servicePrincipalName','operatingSystem','operatingSystemVersion','operatingSystemServicePack'
         Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $defaultNC -Filter $filter -Properties $properties -Credential $Credential | ForEach-Object {
             $obj = $_
             $kerberosDelegation = $false
@@ -888,7 +888,8 @@ Function Get-KerberosDelegation {
                 Write-Output ([pscustomobject] @{
                     sAMAccountName          = $_.samAccountName
                     DistinguishedName       = $_.distinguishedname
-                    ObjectCategory          = $_.objectcategory
+                    SecurityIdentifier      = (New-Object Security.Principal.SecurityIdentifier($_.objectSid, 0)).Value
+                    ObjectCategory          = $_.objectCategory
                     ServicePrincipalName    = $_.servicePrincipalName
                     KerberosDelegation      = $kerberosDelegation
                     DelegationTargetService = $delegationTargetService
@@ -908,7 +909,8 @@ Function Get-KerberosDelegation {
                         Write-Output ([pscustomobject] @{
                             sAMAccountName          = $_.samAccountName
                             DistinguishedName       = $_.distinguishedname
-                            ObjectClass             = $_.objectClass
+                            SecurityIdentifier      = (New-Object Security.Principal.SecurityIdentifier($_.objectSid, 0)).Value
+                            ObjectCategory          = $_.objectCategory
                             ServicePrincipalName    = $_.servicePrincipalName
                             KerberosDelegation      = 'Resource-Based Constrained'
                             DelegationTargetService = $obj.distinguishedname
@@ -1352,6 +1354,174 @@ Function Get-ADCSServer {
     }
 }
 
+Function Get-ADCSCertificateTemplate {
+<#
+.SYNOPSIS
+    Enumerate ADCS certificate templates and check for exploitable vulnerabilities.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-ADCSCertificateTemplate queries domain controller via LDAP protocol for ADCS certificate template information.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER SSL
+    Use SSL connection to LDAP Server.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.PARAMETER Vulnerable
+    Returns vulnerable certificate templates only, defaults to $true.
+
+.EXAMPLE
+    PS C:\> Get-ADCSCertificateTemplate -Server ADATUM.CORP -Credential ADATUM\testuser -Vulnerable:$false
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [Switch]
+        $SSL,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty,
+
+        [Switch]
+        $Vulnerable = $true
+    )
+
+    Begin {
+        try {
+            $rootDSE = Get-LdapRootDSE -Server $Server
+            $configurationNC = $rootDSE.configurationNamingContext[0]
+            $defaultNC = $rootDSE.defaultNamingContext[0]
+        }
+        catch {
+            Write-Error "Domain controller unreachable" -ErrorAction Stop
+        }
+    }
+
+    Process {
+        $domain = Get-LdapObject -Server $Server -SSL:$SSL -Filter '(objectClass=domain)' -Properties 'objectsid' -Credential $Credential
+        $domainSID = ((New-Object Security.Principal.SecurityIdentifier($domain.objectsid, 0)).Value).ToString()
+        $lowPrivSIDs = @()
+        $lowPrivSIDs += 'S-1-5-7'           # Anonymous
+        $lowPrivSIDs += 'S-1-1-0'           # Everyone
+        $lowPrivSIDs += 'S-1-5-11'          # Authenticated users
+        $lowPrivSIDs += "$domainSID-513"    # Domain Users
+        $lowPrivSIDs += "$domainSID-515"    # Domain Computers
+        $lowPrivSIDs += "$domainSID-545"    # Users
+        Get-ADCSServer -Server $Server -SSL:$SSL -Credential $Credential | ForEach-Object {
+            $CA = $_.CertificateAuthority
+            $publishedTemplates =  $_.CertificateTemplates
+            foreach ($publishedTemplate in $publishedTemplates) {
+                $filter = "(&(objectClass=pKICertificateTemplate)(name=$publishedTemplate))"
+                $properties = 'distinguishedName', 'pkiExtendedKeyUsage', 'msPKI-Certificate-Name-Flag', 'msPKI-Enrollment-Flag', 'msPKI-RA-Signature', 'flags'
+                Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $configurationNC -Filter $filter -Properties $properties -Credential $Credential | ForEach-Object {
+                    $distinguishedName = $_.distinguishedName
+
+                    # Is this for Computer?
+                    $destination = 'User'
+                    if (($_.flags -band 0x40) -gt 0) {
+                        $destination = 'Computer'
+                    }
+
+                    # Are there authorized signatures required?
+                    $issuanceRequirements = $false
+                    if ($_.'msPKI-RA-Signature' -gt 0) {
+                        $issuanceRequirements = $true
+                    }
+
+                    # Is manager approval enabled?
+                    $managerApprovalEnabled = $false
+                    # Flag PEND_ALL_REQUESTS
+                    if ($_.'msPKI-Enrollment-Flag' -band 2) {
+                        $managerApprovalEnabled = $true
+                    }
+
+                    # Can enrollee supply Subject or SubjectAlternativeName in certificate request?
+                    $enrolleeSuppliesSubject = $false
+                    $enrolleeSuppliesSAN = $false
+                    # Flag ENROLLEE_SUPPLIES_SUBJECT
+                    if ($_.'msPKI-Certificate-Name-Flag' -band 0x00000001) {
+                        $enrolleeSuppliesSubject = $true
+                    }
+                    # Flag ENROLLEE_SUPPLIES_SUBJECT_ALT_NAME
+                    if ($_.'msPKI-Certificate-Name-Flag' -band 0x00010000) {
+                        $enrolleeSuppliesSAN = $true
+                    }
+                    # Flag OLD_CERT_SUPPLIES_SUBJECT_AND_ALT_NAME
+                    if ($_.'msPKI-Certificate-Name-Flag' -band 0x00000008) {
+                        $enrolleeSuppliesSubject = $true
+                        $enrolleeSuppliesSAN = $true
+                    }
+
+                    # Are there Key Usage extensions for authentication?
+                    $eku = $_.pkiExtendedKeyUsage
+                    $authenticationUsage = $false
+                    $agentTemplate = $false
+                    # Any purpose
+                    if (($eku -eq $null) -or $eku.Contains("2.5.29.37.0")) {
+                        $authenticationUsage = $true
+                    }
+                    # Client authentication
+                    elseif ($eku.Contains("1.3.6.1.5.5.7.3.2") -or $eku.Contains("1.3.6.1.4.1.311.20.2.2") -or $eku.Contains("1.3.6.1.5.2.3.4") -or $eku.Contains(("2.5.29.37.0"))) {
+                        $authenticationUsage = $true
+                    }
+                    # Enrollment agent
+                    elseif ($eku.Contains("1.3.6.1.4.1.311.20.2.1")) {
+                        $agentTemplate = $true
+                    }
+
+                    # Check ACL
+                    $everyoneCanEnroll = $false
+                    $vulnerableACL = $false
+                    Get-LdapObjectAcl -Server $Server -SSL:$SSL -SearchBase $configurationNC -Filter $filter -Properties $properties -Credential $Credential | ForEach-Object {
+                        if ($lowPrivSIDs.Contains($_.SecurityIdentifier.ToString()) -and (($_.AceType -eq "AccessAllowed") -or ($_.AceType -eq "AccessAllowedObject"))) {
+                            # Can low privileged users enroll?
+                            if (($_.ActiveDirectoryRights -eq "ExtendedRight") -and ($_.ObjectAceType -eq "00000000-0000-0000-0000-000000000000") -or ($_.ObjectAceType -eq "0e10c968-78fb-11d2-90d4-00c04f79dc55")) {
+                                $everyoneCanEnroll = $true
+                            }
+                            # Vulnerable ACL?
+                            if (($_.ActiveDirectoryRights -eq "GenericAll") -or ($_.ActiveDirectoryRights -eq "GenericWrite") -or ($_.ActiveDirectoryRights -eq "WriteDACL") -or ($_.ActiveDirectoryRights -eq "WriteOwner")) {
+                                $vulnerableACL = $true
+                            }
+                        }
+                        if ($lowPrivSIDs.Contains($_.ObjectOwner.ToString())) {
+                            $vulnerableACL = $true
+                        }
+                    }
+
+                    if ((-not $Vulnerable) -or $vulnerableACL -or ($everyoneCanEnroll -and ($enrolleeSuppliesSubject -or $enrolleeSuppliesSAN) -and $authenticationUsage -and (-not $managerApprovalEnabled) -and (-not $issuanceRequirements))) {
+                        Write-Output ([pscustomobject] @{
+                            'TemplateName'                  = $publishedTemplate
+                            'DistinguishedName'             = $distinguishedName
+                            'CertificateAuthority'          = $CA
+                            'Destination'                   = $destination
+                            'EveryoneCanEnroll'             = $everyoneCanEnroll
+                            'ManagerApproval'               = $managerApprovalEnabled
+                            'EnrolleeCanSupplySubject'      = $enrolleeSuppliesSubject
+                            'EnrolleeCanSupplySAN'          = $enrolleeSuppliesSAN
+                            'CanBeUsedForAuthentication'    = $authenticationUsage
+                            'AgentTemplate'                 = $agentTemplate
+                            'IssuanceRequirements'          = $issuanceRequirements
+                            'VulnerableACL'                 = $vulnerableACL
+                        })
+                    }
+                }
+            }
+        }
+    }
+}
+
 Function Get-SCCMServer {
 <#
 .SYNOPSIS
@@ -1406,10 +1576,10 @@ Function Get-SCCMServer {
         Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $defaultNC -Filter $filter -Properties $properties -Credential $Credential | ForEach-Object {
             Write-Output ([pscustomobject] @{
                 Fqdn = $_.dnsHostname
-                mSSMSSiteCode = $_.mSSMSSiteCode
-                mSSMSMPName = $_.mSSMSDefaultMP
-                mSSMSDefaultMP = $_.mSSMSDefaultMP
-                mSSMSDeviceManagementPoint = $_.mSSMSDeviceManagementPoint
+                'mS-SMS-Site-Code' = $_.mSSMSSiteCode
+                'mS-SMS-MP-Name' = $_.mSSMSMPName
+                'mS-SMS-Default-MP' = $_.mSSMSDefaultMP
+                'mS-SMS-Device-Management-Point' = $_.mSSMSDeviceManagementPoint
             })
         }
     }
@@ -1968,7 +2138,7 @@ Function Local:Get-LdapObjectAcl {
                 $SearchBase = $defaultNC
             }
         }
-        $securityMasks = [DirectoryServices.SecurityMasks]::Dacl
+        $securityMasks = @([System.DirectoryServices.SecurityMasks]::Dacl, [System.DirectoryServices.SecurityMasks]::Owner)
     }
 
     Process {
@@ -2055,12 +2225,20 @@ Function Local:Get-LdapObjectAcl {
             if ($p.objectsid -and $p.objectsid[0]) {
                 $objectSid = (New-Object Security.Principal.SecurityIdentifier($p.objectsid[0], 0)).Value
             }
-            New-Object Security.AccessControl.RawSecurityDescriptor -ArgumentList $p['ntsecuritydescriptor'][0], 0 | ForEach-Object { $_.DiscretionaryAcl } | ForEach-Object {
-                $_ | Add-Member NoteProperty 'ObjectDN' $p.distinguishedname[0]
-                $_ | Add-Member NoteProperty 'ObjectSID' $objectSid
-                $_ | Add-Member NoteProperty 'ActiveDirectoryRights' ([Enum]::ToObject([DirectoryServices.ActiveDirectoryRights], $_.AccessMask))
-                Write-Output $_
+            try {
+                $objectOwner = $null
+                New-Object Security.AccessControl.RawSecurityDescriptor -ArgumentList $p['ntsecuritydescriptor'][0], 0 | ForEach-Object { 
+                    $objectOwner = $_.Owner
+                    $_.DiscretionaryAcl 
+                } | ForEach-Object {
+                    $_ | Add-Member NoteProperty 'ObjectDN' $p.distinguishedname[0]
+                    $_ | Add-Member NoteProperty 'ObjectSID' $objectSid
+                    $_ | Add-Member NoteProperty 'ObjectOwner' $objectOwner
+                    $_ | Add-Member NoteProperty 'ActiveDirectoryRights' ([Enum]::ToObject([DirectoryServices.ActiveDirectoryRights], $_.AccessMask))
+                    Write-Output $_
+                }
             }
+            catch {}
         }
     }
 
