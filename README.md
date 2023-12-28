@@ -15,6 +15,7 @@ Get-LdapPassword                -   discovers plaintext passwords from a given A
 Get-KerberoastableUser          -   gets user accounts vulnerable to Kerberoast and ASREPRoast attacks
 Get-KerberosDelegation          -   gets accounts granted with Kerberos delegation
 Get-ServicePrincipal            -   discovers Kerberos services by searching for SPNs
+Get-GPUserRightsAssignment      -   gets user rights assignments defined in Group Policy files of a given Active Directory domain.
 Get-VulnerableSchemaClass       -   checks for vulnerable schema classes that can be used to create arbitrary objects
 Get-PrivExchangeStatus          -   checks PrivExchange exploitability regarding to Active Directory ACL
 Get-ExchangeServer              -   gets Exchange servers from a given Active Directory domain and check for exploitable vulnerabilities

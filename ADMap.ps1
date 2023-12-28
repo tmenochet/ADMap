@@ -399,15 +399,15 @@ Function Get-GPPasswordPolicy {
     foreach ($policy in $policies) {
         if ($systemAccess = $policy.SystemAccess) {
             $gpoName = $policy.GPOName
-            $filter = "(&(objectCategory=organizationalUnit)(gplink=*CN=$gpoName*))"
-            $OU = (Get-LdapObject -Server $Server -SSL:$SSL -Credential $Credential -Filter $filter -Properties 'distinguishedName').distinguishedName
-            if (($OU -eq $null) -and ($gpoName -eq '{31B2F340-016D-11D2-945F-00C04FB984F9}')) {
-                $OU = $defaultNC
+            $filter = "(gplink=*CN=$gpoName*)"
+            $appliesTo = (Get-LdapObject -Server $Server -SSL:$SSL -Credential $Credential -Filter $filter -Properties 'distinguishedName').distinguishedName
+            if (($appliesTo -eq $null) -and ($gpoName -eq '{31B2F340-016D-11D2-945F-00C04FB984F9}')) {
+                $appliesTo = $defaultNC
             }
             Write-Output ([pscustomobject] @{
-                DisplayName = $policy.GPODisplayName
-                Name = $gpoName
-                AppliesTo = $OU
+                GPODisplayName = $policy.GPODisplayName
+                GPOName = $gpoName
+                GPOAppliesTo = $appliesTo
                 MinPasswordLength = $systemAccess.MinimumPasswordLength
                 MinPasswordAge = $systemAccess.MinimumPasswordAge
                 MaxPasswordAge = $systemAccess.MaximumPasswordAge
@@ -1090,6 +1090,100 @@ Function Get-ServicePrincipal {
             })
         }
     }
+}
+
+Function Get-GPUserRightsAssignment {
+<#
+.SYNOPSIS
+    Get user rights assignments defined in Group Policy files.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-GPUserRightsAssignment queries domain controller via SMB protocol for user right assignments.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER SSL
+    Use SSL connection to LDAP Server.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.PARAMETER ResolveSIDs
+    Enables SID resolution.
+
+.EXAMPLE
+    PS C:\> Get-GPUserRightsAssignment -Server ADATUM.CORP -Credential ADATUM\testuser -ResolveSIDs
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [Switch]
+        $SSL,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty,
+
+        [Switch]
+        $ResolveSIDs
+    )
+
+    # Prevent output truncation
+    $formatDefaultLimit = $global:FormatEnumerationLimit
+    $global:FormatEnumerationLimit = -1
+
+    $policies = Get-GPSecuritySettings -Server $Server -SSL:$SSL -Credential $Credential
+    foreach ($policy in $policies) {
+        if ($privilegeRights = $policy.PrivilegeRights) {
+            $gpoName = $policy.GPOName
+            $filter = "(gplink=*CN=$gpoName*)"
+            $appliesTo = (Get-LdapObject -Server $Server -SSL:$SSL -Credential $Credential -Filter $filter -Properties 'distinguishedName').distinguishedName
+            $gpo = New-Object PSObject
+            $gpo | Add-Member Noteproperty 'GPODisplayName' $policy.GPODisplayName
+            $gpo | Add-Member Noteproperty 'GPOName' $gpoName
+            $gpo | Add-Member Noteproperty 'GPOAppliesTo' $appliesTo
+            $privilegeRights.PSObject.Properties | ForEach-Object {
+                $assignees = $_.Value
+                if ($assignees -is [array]) {
+                    $index = 0
+                    foreach ($assignee in $assignees) {
+                        $assignee = $assignee.Trim('*')
+                        if ($ResolveSIDs) {
+                            try {
+                                $assignee = ConvertFrom-SID -Server $Server -SSL:$SSL -Credential $Credential -ObjectSID $assignee
+                            }
+                            catch {}
+                        }
+                        $assignees[$index] = $assignee
+                        $index++
+                    }
+                }
+                else {
+                    $assignees = $assignees.Trim('*')
+                    if ($ResolveSIDs) {
+                        try {
+                            $assignees = ConvertFrom-SID -Server $Server -SSL:$SSL -Credential $Credential -ObjectSID $assignees
+                        }
+                        catch {}
+                    }
+                    $assignees = @($assignees)
+                }
+                $gpo | Add-Member Noteproperty $_.Name $assignees
+            }
+            Write-Output $gpo
+        }
+    }
+
+    # Restore output limit
+    $global:FormatEnumerationLimit = $formatDefaultLimit
 }
 
 Function Get-VulnerableSchemaClass {
@@ -1976,6 +2070,207 @@ Function Get-DomainSubnet {
     End {}
 }
 
+Function Local:Get-GPSecuritySettings {
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [Switch]
+        $SSL,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty,
+
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $PolicyName = '*'
+    )
+
+    Begin {
+        Function Local:Get-StringHash ([String]$String, $Algorithm="MD5") {
+            $stringBuilder = New-Object System.Text.StringBuilder
+            [Security.Cryptography.HashAlgorithm]::Create($Algorithm).ComputeHash([Text.Encoding]::UTF8.GetBytes($String)) | % {
+                [Void]$stringBuilder.Append($_.ToString("x2"))
+            }
+            return $stringBuilder.ToString()
+        }
+
+        $policy = switch ($PolicyName) {
+            DefaultDomain               {'{31B2F340-016D-11D2-945F-00C04FB984F9}'}
+            DefaultDomainControllers    {'{6AC1786C-016F-11D2-945F-00C04FB984F9}'}
+            Default                     {$PolicyName}
+        }
+        $mappedDrives = New-Object Collections.ArrayList
+    }
+
+    Process {
+        $filter = "(&(objectCategory=groupPolicyContainer)(name=$policy))"
+        $properties = 'Name', 'DisplayName', 'gpcfilesyspath'
+        Get-LdapObject -Server $Server -SSL:$SSL -Filter $filter -Properties $properties -Credential $Credential | ForEach-Object {
+            $gptTmplPath = $_.gpcfilesyspath + '\MACHINE\Microsoft\Windows NT\SecEdit\GptTmpl.inf'
+            if (($gptTmplPath -Match '\\\\.*\\.*') -and $Credential.Username) {
+                $fileHost = (New-Object System.Uri($gptTmplPath)).Host
+                $fileshare = ($gptTmplPath -split '\\').Get(3)
+                $relativePath = ($gptTmplPath -split $fileshare).Get(1)
+                $sharePath = "\\$fileHost\$fileshare"
+                $drive = Get-StringHash $sharePath.ToLower()
+                if (-not $mappedDrives.Contains($drive)) {
+                    New-PSDrive -Name $drive -Root $sharePath -PSProvider "FileSystem" -Credential $Credential | Out-Null
+                    $mappedDrives.add($drive) | Out-Null
+                }
+                $filePath = "${drive}:$relativePath"
+            }
+            else {
+                $filePath = $gptTmplPath
+            }
+            if (Test-Path -Path $filePath) {
+                # Parse INI file
+                $iniObject = New-Object PSObject
+                switch -Regex -File $filePath {
+                    "^\[(.+)\]" # Section
+                    {
+                        $section = $matches[1].Trim()
+                        $section = $section.Replace(' ', '')
+                        $sectionObject = New-Object PSObject
+                        $iniObject | Add-Member Noteproperty $section $sectionObject
+                        $commentCount = 0
+                    }
+                    "^(;.*)$" # Comment
+                    {
+                        $value = $matches[1].Trim()
+                        $commentCount = $commentCount + 1
+                        $name = 'Comment' + $commentCount
+                        $name = $name.Replace(' ', '')
+                        $iniObject.$section | Add-Member Noteproperty $name $value
+                    }
+                    "(.+?)\s*=(.*)" # Key
+                    {
+                        $name, $value = $matches[1..2]
+                        $name = $name.Trim()
+                        $values = $value.split(',') | ForEach-Object { $_.Trim() }
+                        #if ($values -isnot [Array]) { $values = @($values) }
+                        $name = $name.Replace(' ', '')
+                        $iniObject.$section | Add-Member Noteproperty $name $values
+                    }
+                }
+                $iniObject | Add-Member Noteproperty 'Path' $filePath
+                $iniObject | Add-Member Noteproperty 'GPOName' $_.Name
+                $iniObject | Add-Member Noteproperty 'GPODisplayName' $_.DisplayName
+                Write-Output $iniObject
+            }
+            else {
+                Write-Verbose "Unable to access $filePath"
+            }
+        }
+    }
+
+    End {
+        foreach ($mappedDrive in $mappedDrives) {
+            Remove-PSDrive $mappedDrive
+        }
+    }
+}
+
+Function Local:ConvertFrom-SID {
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [Switch]
+        $SSL,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty,
+
+        [Parameter(Mandatory = $True, ValueFromPipeline = $True, ValueFromPipelineByPropertyName = $True)]
+        [ValidatePattern('^S-1-.*')]
+        [String[]]
+        $ObjectSID
+    )
+
+    foreach ($targetSid in $ObjectSID) {
+        $targetSid = $targetSid.Trim('*')
+        try {
+            # try to resolve any built-in SIDs first - https://support.microsoft.com/en-us/kb/243330
+            Switch ($targetSid) {
+                'S-1-0'         { 'Null Authority' }
+                'S-1-0-0'       { 'Nobody' }
+                'S-1-1'         { 'World Authority' }
+                'S-1-1-0'       { 'Everyone' }
+                'S-1-2'         { 'Local Authority' }
+                'S-1-2-0'       { 'Local' }
+                'S-1-2-1'       { 'Console Logon ' }
+                'S-1-3'         { 'Creator Authority' }
+                'S-1-3-0'       { 'Creator Owner' }
+                'S-1-3-1'       { 'Creator Group' }
+                'S-1-3-2'       { 'Creator Owner Server' }
+                'S-1-3-3'       { 'Creator Group Server' }
+                'S-1-3-4'       { 'Owner Rights' }
+                'S-1-4'         { 'Non-unique Authority' }
+                'S-1-5'         { 'NT AUTHORITY' }
+                'S-1-5-1'       { 'Dialup' }
+                'S-1-5-2'       { 'Network' }
+                'S-1-5-3'       { 'Batch' }
+                'S-1-5-4'       { 'Interactive' }
+                'S-1-5-6'       { 'Service' }
+                'S-1-5-7'       { 'Anonymous' }
+                'S-1-5-8'       { 'Proxy' }
+                'S-1-5-9'       { 'Enterprise Domain Controllers' }
+                'S-1-5-10'      { 'Principal Self' }
+                'S-1-5-11'      { 'Authenticated Users' }
+                'S-1-5-12'      { 'Restricted Code' }
+                'S-1-5-13'      { 'Terminal Server Users' }
+                'S-1-5-14'      { 'Remote Interactive Logon' }
+                'S-1-5-15'      { 'This Organization ' }
+                'S-1-5-17'      { 'This Organization ' }
+                'S-1-5-18'      { 'Local System' }
+                'S-1-5-19'      { 'NT AUTHORITY\Local Service' }
+                'S-1-5-20'      { 'NT AUTHORITY\Network Service' }
+                'S-1-5-80-0'    { 'All Services ' }
+                'S-1-5-32-544'  { 'BUILTIN\Administrators' }
+                'S-1-5-32-545'  { 'BUILTIN\Users' }
+                'S-1-5-32-546'  { 'BUILTIN\Guests' }
+                'S-1-5-32-547'  { 'BUILTIN\Power Users' }
+                'S-1-5-32-548'  { 'BUILTIN\Account Operators' }
+                'S-1-5-32-549'  { 'BUILTIN\Server Operators' }
+                'S-1-5-32-550'  { 'BUILTIN\Print Operators' }
+                'S-1-5-32-551'  { 'BUILTIN\Backup Operators' }
+                'S-1-5-32-552'  { 'BUILTIN\Replicators' }
+                'S-1-5-32-554'  { 'BUILTIN\Pre-Windows 2000 Compatible Access' }
+                'S-1-5-32-555'  { 'BUILTIN\Remote Desktop Users' }
+                'S-1-5-32-556'  { 'BUILTIN\Network Configuration Operators' }
+                'S-1-5-32-557'  { 'BUILTIN\Incoming Forest Trust Builders' }
+                'S-1-5-32-558'  { 'BUILTIN\Performance Monitor Users' }
+                'S-1-5-32-559'  { 'BUILTIN\Performance Log Users' }
+                'S-1-5-32-560'  { 'BUILTIN\Windows Authorization Access Group' }
+                'S-1-5-32-561'  { 'BUILTIN\Terminal Server License Servers' }
+                'S-1-5-32-562'  { 'BUILTIN\Distributed COM Users' }
+                'S-1-5-32-569'  { 'BUILTIN\Cryptographic Operators' }
+                'S-1-5-32-573'  { 'BUILTIN\Event Log Readers' }
+                'S-1-5-32-574'  { 'BUILTIN\Certificate Service DCOM Access' }
+                'S-1-5-32-575'  { 'BUILTIN\RDS Remote Access Servers' }
+                'S-1-5-32-576'  { 'BUILTIN\RDS Endpoint Servers' }
+                'S-1-5-32-577'  { 'BUILTIN\RDS Management Servers' }
+                'S-1-5-32-578'  { 'BUILTIN\Hyper-V Administrators' }
+                'S-1-5-32-579'  { 'BUILTIN\Access Control Assistance Operators' }
+                'S-1-5-32-580'  { 'BUILTIN\Access Control Assistance Operators' }
+                Default {
+                    (Get-LdapObject -Server $Server -SSL:$SSL -Filter "(objectsid=$targetSid)" -Properties 'samAccountName' -Credential $Credential).samAccountName
+                }
+            }
+        }
+        catch {
+            Write-Verbose "Error converting SID '$targetSid' : $_"
+        }
+    }
+}
+
 Function Local:Get-LdapRootDSE {
     Param (
         [ValidateNotNullOrEmpty()]
@@ -2321,111 +2616,6 @@ Function Local:Get-LdapObjectAcl {
         }
         if ($searcher) {
             $searcher.dispose()
-        }
-    }
-}
-
-Function Local:Get-GPSecuritySettings {
-    [CmdletBinding()]
-    Param (
-        [ValidateNotNullOrEmpty()]
-        [String]
-        $Server = $Env:USERDNSDOMAIN,
-
-        [Switch]
-        $SSL,
-
-        [ValidateNotNullOrEmpty()]
-        [Management.Automation.PSCredential]
-        [Management.Automation.Credential()]
-        $Credential = [Management.Automation.PSCredential]::Empty,
-
-        [ValidateNotNullOrEmpty()]
-        [String]
-        $PolicyName = '*'
-    )
-
-    Begin {
-        Function Local:Get-StringHash ([String]$String, $Algorithm="MD5") {
-            $stringBuilder = New-Object System.Text.StringBuilder
-            [Security.Cryptography.HashAlgorithm]::Create($Algorithm).ComputeHash([Text.Encoding]::UTF8.GetBytes($String)) | % {
-                [Void]$stringBuilder.Append($_.ToString("x2"))
-            }
-            return $stringBuilder.ToString()
-        }
-
-        $policy = switch ($PolicyName) {
-            DefaultDomain               {'{31B2F340-016D-11D2-945F-00C04FB984F9}'}
-            DefaultDomainControllers    {'{6AC1786C-016F-11D2-945F-00C04FB984F9}'}
-            Default                     {$PolicyName}
-        }
-        $mappedDrives = New-Object Collections.ArrayList
-    }
-
-    Process {
-        $filter = "(&(objectCategory=groupPolicyContainer)(name=$policy))"
-        $properties = 'Name', 'DisplayName', 'gpcfilesyspath'
-        Get-LdapObject -Server $Server -SSL:$SSL -Filter $filter -Properties $properties -Credential $Credential | ForEach-Object {
-            $gptTmplPath = $_.gpcfilesyspath + '\MACHINE\Microsoft\Windows NT\SecEdit\GptTmpl.inf'
-            if (($gptTmplPath -Match '\\\\.*\\.*') -and $Credential.Username) {
-                $fileHost = (New-Object System.Uri($gptTmplPath)).Host
-                $fileshare = ($gptTmplPath -split '\\').Get(3)
-                $relativePath = ($gptTmplPath -split $fileshare).Get(1)
-                $sharePath = "\\$fileHost\$fileshare"
-                $drive = Get-StringHash $sharePath.ToLower()
-                if (-not $mappedDrives.Contains($drive)) {
-                    New-PSDrive -Name $drive -Root $sharePath -PSProvider "FileSystem" -Credential $Credential | Out-Null
-                    $mappedDrives.add($drive) | Out-Null
-                }
-                $filePath = "${drive}:$relativePath"
-            }
-            else {
-                $filePath = $gptTmplPath
-            }
-            if (Test-Path -Path $filePath) {
-                # Parse INI file
-                $iniObject = New-Object PSObject
-                switch -Regex -File $filePath {
-                    "^\[(.+)\]" # Section
-                    {
-                        $section = $matches[1].Trim()
-                        $section = $section.Replace(' ', '')
-                        $sectionObject = New-Object PSObject
-                        $iniObject | Add-Member Noteproperty $section $sectionObject
-                        $commentCount = 0
-                    }
-                    "^(;.*)$" # Comment
-                    {
-                        $value = $matches[1].Trim()
-                        $commentCount = $commentCount + 1
-                        $name = 'Comment' + $commentCount
-                        $name = $name.Replace(' ', '')
-                        $iniObject.$section | Add-Member Noteproperty $name $value
-                    }
-                    "(.+?)\s*=(.*)" # Key
-                    {
-                        $name, $value = $matches[1..2]
-                        $name = $name.Trim()
-                        $values = $value.split(',') | ForEach-Object { $_.Trim() }
-                        #if ($values -isnot [Array]) { $values = @($values) }
-                        $name = $name.Replace(' ', '')
-                        $iniObject.$section | Add-Member Noteproperty $name $values
-                    }
-                }
-                $iniObject | Add-Member Noteproperty 'Path' $filePath
-                $iniObject | Add-Member Noteproperty 'GPOName' $_.Name
-                $iniObject | Add-Member Noteproperty 'GPODisplayName' $_.DisplayName
-                Write-Output $iniObject
-            }
-            else {
-                Write-Verbose "Unable to access $filePath"
-            }
-        }
-    }
-
-    End {
-        foreach ($mappedDrive in $mappedDrives) {
-            Remove-PSDrive $mappedDrive
         }
     }
 }
