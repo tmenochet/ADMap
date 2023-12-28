@@ -238,7 +238,7 @@ Function Get-TrustRelationship {
     }
 }
 
-Function Get-PasswordPolicy {
+Function Get-LdapPasswordPolicy {
 <#
 .SYNOPSIS
     Get password policies defined in an Active Directory domain.
@@ -246,7 +246,7 @@ Function Get-PasswordPolicy {
     Author: Timothee MENOCHET (@_tmenochet)
 
 .DESCRIPTION
-    Get-PasswordPolicy queries domain controller via LDAP protocol for default password policy as well as fine-grained password policies.
+    Get-LdapPasswordPolicy queries domain controller via LDAP protocol for default password policy as well as fine-grained password policies.
 
 .PARAMETER Server
     Specifies the domain controller to query.
@@ -258,7 +258,7 @@ Function Get-PasswordPolicy {
     Specifies the domain account to use.
 
 .EXAMPLE
-    PS C:\> Get-PasswordPolicy -Server ADATUM.CORP -Credential ADATUM\testuser
+    PS C:\> Get-LdapPasswordPolicy -Server ADATUM.CORP -Credential ADATUM\testuser
 #>
 
     [CmdletBinding()]
@@ -344,6 +344,79 @@ Function Get-PasswordPolicy {
                 LockoutThreshold = $_.'msds-lockoutthreshold'
                 LockoutDuration = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-lockoutduration')).ToString()
                 LockoutObservationWindow = [TimeSpan]::FromTicks([Math]::ABS($_.'msds-lockoutobservationwindow')).ToString()
+            })
+        }
+    }
+}
+
+Function Get-GPPasswordPolicy {
+<#
+.SYNOPSIS
+    Get password policies defined in Group Policy files.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-GPPasswordPolicy queries domain controller via SMB protocol for password policies.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER SSL
+    Use SSL connection to LDAP Server.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.EXAMPLE
+    PS C:\> Get-GPPasswordPolicy -Server ADATUM.CORP -Credential ADATUM\testuser
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [Switch]
+        $SSL,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
+    )
+
+    try {
+        $rootDSE = Get-LdapRootDSE -Server $Server
+        $defaultNC = $rootDSE.defaultNamingContext[0]
+    }
+    catch {
+        Write-Error "Domain controller unreachable" -ErrorAction Stop
+    }
+
+    $policies = Get-GPSecuritySettings -Server $Server -SSL:$SSL -Credential $Credential
+    foreach ($policy in $policies) {
+        if ($systemAccess = $policy.SystemAccess) {
+            $gpoName = $policy.GPOName
+            $filter = "(&(objectCategory=organizationalUnit)(gplink=*CN=$gpoName*))"
+            $OU = (Get-LdapObject -Server $Server -SSL:$SSL -Credential $Credential -Filter $filter -Properties 'distinguishedName').distinguishedName
+            if (($OU -eq $null) -and ($gpoName -eq '{31B2F340-016D-11D2-945F-00C04FB984F9}')) {
+                $OU = $defaultNC
+            }
+            Write-Output ([pscustomobject] @{
+                DisplayName = $policy.GPODisplayName
+                Name = $gpoName
+                AppliesTo = $OU
+                MinPasswordLength = $systemAccess.MinimumPasswordLength
+                MinPasswordAge = $systemAccess.MinimumPasswordAge
+                MaxPasswordAge = $systemAccess.MaximumPasswordAge
+                PasswordHistoryCount = $systemAccess.PasswordHistorySize
+                ComplexityEnabled = $systemAccess.PasswordComplexity
+                ReversibleEncryptionEnabled = $systemAccess.ClearTextPassword
+                LockoutThreshold = $systemAccess.LockoutBadCount
+                LockoutDuration = $systemAccess.LockoutDuration
+                LockoutObservationWindow = $systemAccess.ResetLockoutCount
             })
         }
     }
@@ -2248,6 +2321,111 @@ Function Local:Get-LdapObjectAcl {
         }
         if ($searcher) {
             $searcher.dispose()
+        }
+    }
+}
+
+Function Local:Get-GPSecuritySettings {
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [Switch]
+        $SSL,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty,
+
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $PolicyName = '*'
+    )
+
+    Begin {
+        Function Local:Get-StringHash ([String]$String, $Algorithm="MD5") {
+            $stringBuilder = New-Object System.Text.StringBuilder
+            [Security.Cryptography.HashAlgorithm]::Create($Algorithm).ComputeHash([Text.Encoding]::UTF8.GetBytes($String)) | % {
+                [Void]$stringBuilder.Append($_.ToString("x2"))
+            }
+            return $stringBuilder.ToString()
+        }
+
+        $policy = switch ($PolicyName) {
+            DefaultDomain               {'{31B2F340-016D-11D2-945F-00C04FB984F9}'}
+            DefaultDomainControllers    {'{6AC1786C-016F-11D2-945F-00C04FB984F9}'}
+            Default                     {$PolicyName}
+        }
+        $mappedDrives = New-Object Collections.ArrayList
+    }
+
+    Process {
+        $filter = "(&(objectCategory=groupPolicyContainer)(name=$policy))"
+        $properties = 'Name', 'DisplayName', 'gpcfilesyspath'
+        Get-LdapObject -Server $Server -SSL:$SSL -Filter $filter -Properties $properties -Credential $Credential | ForEach-Object {
+            $gptTmplPath = $_.gpcfilesyspath + '\MACHINE\Microsoft\Windows NT\SecEdit\GptTmpl.inf'
+            if (($gptTmplPath -Match '\\\\.*\\.*') -and $Credential.Username) {
+                $fileHost = (New-Object System.Uri($gptTmplPath)).Host
+                $fileshare = ($gptTmplPath -split '\\').Get(3)
+                $relativePath = ($gptTmplPath -split $fileshare).Get(1)
+                $sharePath = "\\$fileHost\$fileshare"
+                $drive = Get-StringHash $sharePath.ToLower()
+                if (-not $mappedDrives.Contains($drive)) {
+                    New-PSDrive -Name $drive -Root $sharePath -PSProvider "FileSystem" -Credential $Credential | Out-Null
+                    $mappedDrives.add($drive) | Out-Null
+                }
+                $filePath = "${drive}:$relativePath"
+            }
+            else {
+                $filePath = $gptTmplPath
+            }
+            if (Test-Path -Path $filePath) {
+                # Parse INI file
+                $iniObject = New-Object PSObject
+                switch -Regex -File $filePath {
+                    "^\[(.+)\]" # Section
+                    {
+                        $section = $matches[1].Trim()
+                        $section = $section.Replace(' ', '')
+                        $sectionObject = New-Object PSObject
+                        $iniObject | Add-Member Noteproperty $section $sectionObject
+                        $commentCount = 0
+                    }
+                    "^(;.*)$" # Comment
+                    {
+                        $value = $matches[1].Trim()
+                        $commentCount = $commentCount + 1
+                        $name = 'Comment' + $commentCount
+                        $name = $name.Replace(' ', '')
+                        $iniObject.$section | Add-Member Noteproperty $name $value
+                    }
+                    "(.+?)\s*=(.*)" # Key
+                    {
+                        $name, $value = $matches[1..2]
+                        $name = $name.Trim()
+                        $values = $value.split(',') | ForEach-Object { $_.Trim() }
+                        #if ($values -isnot [Array]) { $values = @($values) }
+                        $name = $name.Replace(' ', '')
+                        $iniObject.$section | Add-Member Noteproperty $name $values
+                    }
+                }
+                $iniObject | Add-Member Noteproperty 'Path' $filePath
+                $iniObject | Add-Member Noteproperty 'GPOName' $_.Name
+                $iniObject | Add-Member Noteproperty 'GPODisplayName' $_.DisplayName
+                Write-Output $iniObject
+            }
+            else {
+                Write-Verbose "Unable to access $filePath"
+            }
+        }
+    }
+
+    End {
+        foreach ($mappedDrive in $mappedDrives) {
+            Remove-PSDrive $mappedDrive
         }
     }
 }
