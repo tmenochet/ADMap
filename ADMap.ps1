@@ -1569,7 +1569,6 @@ Function Get-ADCSCertificateTemplate {
         try {
             $rootDSE = Get-LdapRootDSE -Server $Server
             $configurationNC = $rootDSE.configurationNamingContext[0]
-            $defaultNC = $rootDSE.defaultNamingContext[0]
         }
         catch {
             Write-Error "Domain controller unreachable" -ErrorAction Stop
@@ -1612,6 +1611,13 @@ Function Get-ADCSCertificateTemplate {
                     # Flag PEND_ALL_REQUESTS
                     if ($_.'msPKI-Enrollment-Flag' -band 2) {
                         $managerApprovalEnabled = $true
+                    }
+
+                    # Is the object szOID_NTDS_CA_SECURITY_EXT will be included?
+                    $noSecurityExtension = $false
+                    # Flag PEND_ALL_REQUESTS
+                    if ($_.'msPKI-Enrollment-Flag' -band 0x80000) {
+                        $noSecurityExtension = $true
                     }
 
                     # Can enrollee supply Subject or SubjectAlternativeName in certificate request?
@@ -1667,7 +1673,7 @@ Function Get-ADCSCertificateTemplate {
                         }
                     }
 
-                    if ((-not $Vulnerable) -or $vulnerableACL -or ($everyoneCanEnroll -and ($enrolleeSuppliesSubject -or $enrolleeSuppliesSAN) -and $authenticationUsage -and (-not $managerApprovalEnabled) -and (-not $issuanceRequirements))) {
+                    if ((-not $Vulnerable) -or $vulnerableACL -or ($everyoneCanEnroll -and ($enrolleeSuppliesSubject -or $enrolleeSuppliesSAN -or $agentTemplate -or $noSecurityExtension) -and $authenticationUsage -and (-not $managerApprovalEnabled) -and (-not $issuanceRequirements))) {
                         Write-Output ([pscustomobject] @{
                             'TemplateName'                  = $publishedTemplate
                             'DistinguishedName'             = $distinguishedName
@@ -1679,6 +1685,7 @@ Function Get-ADCSCertificateTemplate {
                             'EnrolleeCanSupplySAN'          = $enrolleeSuppliesSAN
                             'CanBeUsedForAuthentication'    = $authenticationUsage
                             'AgentTemplate'                 = $agentTemplate
+                            'NoSecurityExtension'           = $noSecurityExtension
                             'IssuanceRequirements'          = $issuanceRequirements
                             'VulnerableACL'                 = $vulnerableACL
                         })
