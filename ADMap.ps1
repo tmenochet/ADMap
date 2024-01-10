@@ -1654,22 +1654,27 @@ Function Get-ADCSCertificateTemplate {
                         $agentTemplate = $true
                     }
 
+                    # Check owner
+                    $vulnerableACL = $false
+                    Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $configurationNC -Filter $filter -Properties 'ntSecurityDescriptor' -Credential $Credential | ForEach-Object {
+                        $owner = (New-Object -TypeName Security.AccessControl.RawSecurityDescriptor ($_.ntSecurityDescriptor, 0)).Owner.Value
+                        if ($lowPrivSIDs.Contains($owner.ToString())) {
+                            $vulnerableACL = $true
+                        }
+                    }
+
                     # Check ACL
                     $everyoneCanEnroll = $false
-                    $vulnerableACL = $false
                     Get-LdapObjectAcl -Server $Server -SSL:$SSL -SearchBase $configurationNC -Filter $filter -Properties $properties -Credential $Credential | ForEach-Object {
                         if ($lowPrivSIDs.Contains($_.SecurityIdentifier.ToString()) -and (($_.AceType -eq "AccessAllowed") -or ($_.AceType -eq "AccessAllowedObject"))) {
                             # Can low privileged users enroll?
-                            if (($_.ActiveDirectoryRights -eq "ExtendedRight") -and ($_.ObjectAceType -eq "00000000-0000-0000-0000-000000000000") -or ($_.ObjectAceType -eq "0e10c968-78fb-11d2-90d4-00c04f79dc55")) {
+                            if (($_.ActiveDirectoryRights -eq "ExtendedRight") -and (($_.ObjectAceType -eq $null) -or ($_.ObjectAceType -eq "00000000-0000-0000-0000-000000000000") -or ($_.ObjectAceType -eq "0e10c968-78fb-11d2-90d4-00c04f79dc55"))) {
                                 $everyoneCanEnroll = $true
                             }
                             # Vulnerable ACL?
                             if (($_.ActiveDirectoryRights -eq "GenericAll") -or ($_.ActiveDirectoryRights -eq "GenericWrite") -or ($_.ActiveDirectoryRights -eq "WriteDACL") -or ($_.ActiveDirectoryRights -eq "WriteOwner")) {
                                 $vulnerableACL = $true
                             }
-                        }
-                        if ($lowPrivSIDs.Contains($_.ObjectOwner.ToString())) {
-                            $vulnerableACL = $true
                         }
                     }
 
@@ -2513,7 +2518,7 @@ Function Local:Get-LdapObjectAcl {
                 $SearchBase = $defaultNC
             }
         }
-        $securityMasks = @([System.DirectoryServices.SecurityMasks]::Dacl, [System.DirectoryServices.SecurityMasks]::Owner)
+        $securityMasks = @([System.DirectoryServices.SecurityMasks]::Dacl)
     }
 
     Process {
@@ -2538,6 +2543,7 @@ Function Local:Get-LdapObjectAcl {
                 $sdFlagsControl = New-Object -TypeName System.DirectoryServices.Protocols.SecurityDescriptorFlagControl -ArgumentList $securityMasks
                 $request.Controls.Add($sdFlagsControl) | Out-Null
                 $response = $searcher.SendRequest($request)
+                $results = @()
                 while ($true) {
                     $response = $searcher.SendRequest($request)
                     if ($response.ResultCode -eq 'Success') {
@@ -2596,19 +2602,9 @@ Function Local:Get-LdapObjectAcl {
             else {
                 $p = $_.Properties
             }
-            $objectSid = $null
-            if ($p.objectsid -and $p.objectsid[0]) {
-                $objectSid = (New-Object Security.Principal.SecurityIdentifier($p.objectsid[0], 0)).Value
-            }
             try {
-                $objectOwner = $null
-                New-Object Security.AccessControl.RawSecurityDescriptor -ArgumentList $p['ntsecuritydescriptor'][0], 0 | ForEach-Object { 
-                    $objectOwner = $_.Owner
-                    $_.DiscretionaryAcl 
-                } | ForEach-Object {
+                New-Object Security.AccessControl.RawSecurityDescriptor -ArgumentList $p['ntsecuritydescriptor'][0], 0 | ForEach-Object { $_.DiscretionaryAcl } | ForEach-Object {
                     $_ | Add-Member NoteProperty 'ObjectDN' $p.distinguishedname[0]
-                    $_ | Add-Member NoteProperty 'ObjectSID' $objectSid
-                    $_ | Add-Member NoteProperty 'ObjectOwner' $objectOwner
                     $_ | Add-Member NoteProperty 'ActiveDirectoryRights' ([Enum]::ToObject([DirectoryServices.ActiveDirectoryRights], $_.AccessMask))
                     Write-Output $_
                 }
