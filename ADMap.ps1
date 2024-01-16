@@ -1540,11 +1540,11 @@ Function Get-ADCSCertificateTemplate {
 .PARAMETER Credential
     Specifies the domain account to use.
 
-.PARAMETER Vulnerable
+.PARAMETER VulnerableOnly
     Returns vulnerable certificate templates only, defaults to $true.
 
 .EXAMPLE
-    PS C:\> Get-ADCSCertificateTemplate -Server ADATUM.CORP -Credential ADATUM\testuser -Vulnerable:$false
+    PS C:\> Get-ADCSCertificateTemplate -Server ADATUM.CORP -Credential ADATUM\testuser -VulnerableOnly $false
 #>
 
     [CmdletBinding()]
@@ -1561,8 +1561,8 @@ Function Get-ADCSCertificateTemplate {
         [Management.Automation.Credential()]
         $Credential = [Management.Automation.PSCredential]::Empty,
 
-        [Switch]
-        $Vulnerable = $true
+        [bool]
+        $VulnerableOnly = $true
     )
 
     Begin {
@@ -1656,10 +1656,12 @@ Function Get-ADCSCertificateTemplate {
 
                     # Check owner
                     $vulnerableACL = $false
-                    Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $configurationNC -Filter $filter -Properties 'ntSecurityDescriptor' -Credential $Credential | ForEach-Object {
-                        $owner = (New-Object -TypeName Security.AccessControl.RawSecurityDescriptor ($_.ntSecurityDescriptor, 0)).Owner.Value
-                        if ($lowPrivSIDs.Contains($owner.ToString())) {
-                            $vulnerableACL = $true
+                    Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $configurationNC -Filter $filter -Properties 'ntSecurityDescriptor' -Credential $Credential -SecurityMasks @([DirectoryServices.SecurityMasks]::Owner) | ForEach-Object {
+                        if ($ntSecurityDescriptor = $_.ntSecurityDescriptor) {
+                            $owner = (New-Object -TypeName Security.AccessControl.RawSecurityDescriptor ($ntSecurityDescriptor, 0)).Owner.Value
+                            if ($lowPrivSIDs.Contains($owner.ToString())) {
+                                $vulnerableACL = $true
+                            }
                         }
                     }
 
@@ -1668,17 +1670,17 @@ Function Get-ADCSCertificateTemplate {
                     Get-LdapObjectAcl -Server $Server -SSL:$SSL -SearchBase $configurationNC -Filter $filter -Properties $properties -Credential $Credential | ForEach-Object {
                         if ($lowPrivSIDs.Contains($_.SecurityIdentifier.ToString()) -and (($_.AceType -eq "AccessAllowed") -or ($_.AceType -eq "AccessAllowedObject"))) {
                             # Can low privileged users enroll?
-                            if (($_.ActiveDirectoryRights -eq "ExtendedRight") -and (($_.ObjectAceType -eq $null) -or ($_.ObjectAceType -eq "00000000-0000-0000-0000-000000000000") -or ($_.ObjectAceType -eq "0e10c968-78fb-11d2-90d4-00c04f79dc55"))) {
+                            if (($_.ActiveDirectoryRights -imatch "ExtendedRight") -and (($_.ObjectAceType -eq $null) -or ($_.ObjectAceType -eq "00000000-0000-0000-0000-000000000000") -or ($_.ObjectAceType -eq "0e10c968-78fb-11d2-90d4-00c04f79dc55"))) {
                                 $everyoneCanEnroll = $true
                             }
                             # Vulnerable ACL?
-                            if (($_.ActiveDirectoryRights -eq "GenericAll") -or ($_.ActiveDirectoryRights -eq "GenericWrite") -or ($_.ActiveDirectoryRights -eq "WriteDACL") -or ($_.ActiveDirectoryRights -eq "WriteOwner")) {
+                            if (($_.ActiveDirectoryRights -imatch "GenericAll") -or ($_.ActiveDirectoryRights -imatch "GenericWrite") -or ($_.ActiveDirectoryRights -imatch "WriteDACL") -or ($_.ActiveDirectoryRights -imatch "WriteOwner")) {
                                 $vulnerableACL = $true
                             }
                         }
                     }
 
-                    if ((-not $Vulnerable) -or $vulnerableACL -or ($everyoneCanEnroll -and ($enrolleeSuppliesSubject -or $enrolleeSuppliesSAN -or $agentTemplate -or $noSecurityExtension) -and $authenticationUsage -and (-not $managerApprovalEnabled) -and (-not $issuanceRequirements))) {
+                    if ((-not $VulnerableOnly) -or $vulnerableACL -or ($everyoneCanEnroll -and ($enrolleeSuppliesSubject -or $enrolleeSuppliesSAN -or $agentTemplate -or $noSecurityExtension) -and $authenticationUsage -and (-not $managerApprovalEnabled) -and (-not $issuanceRequirements))) {
                         Write-Output ([pscustomobject] @{
                             'TemplateName'                  = $publishedTemplate
                             'DistinguishedName'             = $distinguishedName
@@ -2103,7 +2105,7 @@ Function Local:Get-GPSecuritySettings {
 
     Begin {
         Function Local:Get-StringHash ([String]$String, $Algorithm="MD5") {
-            $stringBuilder = New-Object System.Text.StringBuilder
+            $stringBuilder = New-Object Text.StringBuilder
             [Security.Cryptography.HashAlgorithm]::Create($Algorithm).ComputeHash([Text.Encoding]::UTF8.GetBytes($String)) | % {
                 [Void]$stringBuilder.Append($_.ToString("x2"))
             }
@@ -2124,7 +2126,7 @@ Function Local:Get-GPSecuritySettings {
         Get-LdapObject -Server $Server -SSL:$SSL -Filter $filter -Properties $properties -Credential $Credential | ForEach-Object {
             $gptTmplPath = $_.gpcfilesyspath + '\MACHINE\Microsoft\Windows NT\SecEdit\GptTmpl.inf'
             if (($gptTmplPath -Match '\\\\.*\\.*') -and $Credential.Username) {
-                $fileHost = (New-Object System.Uri($gptTmplPath)).Host
+                $fileHost = (New-Object Uri($gptTmplPath)).Host
                 $fileshare = ($gptTmplPath -split '\\').Get(3)
                 $relativePath = ($gptTmplPath -split $fileshare).Get(1)
                 $sharePath = "\\$fileHost\$fileshare"
@@ -2337,7 +2339,14 @@ Function Local:Get-LdapObject {
         [ValidateNotNullOrEmpty()]
         [Management.Automation.PSCredential]
         [Management.Automation.Credential()]
-        $Credential = [Management.Automation.PSCredential]::Empty
+        $Credential = [Management.Automation.PSCredential]::Empty,
+
+        [ValidateNotNullOrEmpty()]
+        [DirectoryServices.SecurityMasks[]]
+        $SecurityMasks,
+
+        [Switch]
+        $Raw
     )
 
     Begin {
@@ -2363,7 +2372,7 @@ Function Local:Get-LdapObject {
                 $results = @()
                 $domain = $defaultNC -replace 'DC=' -replace ',','.'
                 [Reflection.Assembly]::LoadWithPartialName("System.DirectoryServices.Protocols") | Out-Null
-                $searcher = New-Object -TypeName System.DirectoryServices.Protocols.LdapConnection -ArgumentList "$($Server):636"
+                $searcher = New-Object -TypeName DirectoryServices.Protocols.LdapConnection -ArgumentList "$($Server):636"
                 $searcher.SessionOptions.SecureSocketLayer = $true
                 $searcher.SessionOptions.VerifyServerCertificate = {$true}
                 $searcher.SessionOptions.DomainName = $domain
@@ -2375,13 +2384,17 @@ Function Local:Get-LdapObject {
                     $searcher.Bind()
                 }
                 if ($Properties -ne '*') {
-                    $request = New-Object -TypeName System.DirectoryServices.Protocols.SearchRequest($SearchBase, $Filter, $SearchScope, $Properties)
+                    $request = New-Object -TypeName DirectoryServices.Protocols.SearchRequest($SearchBase, $Filter, $SearchScope, $Properties)
                 }
                 else {
-                    $request = New-Object -TypeName System.DirectoryServices.Protocols.SearchRequest($SearchBase, $Filter, $SearchScope)
+                    $request = New-Object -TypeName DirectoryServices.Protocols.SearchRequest($SearchBase, $Filter, $SearchScope)
                 }
-                $pageRequestControl = New-Object -TypeName System.DirectoryServices.Protocols.PageResultRequestControl -ArgumentList $PageSize
+                $pageRequestControl = New-Object -TypeName DirectoryServices.Protocols.PageResultRequestControl -ArgumentList $PageSize
                 $request.Controls.Add($pageRequestControl) | Out-Null
+                if ($SecurityMasks) {
+                    $sdFlagsControl = New-Object -TypeName DirectoryServices.Protocols.SecurityDescriptorFlagControl -ArgumentList $SecurityMasks
+                    $request.Controls.Add($sdFlagsControl) | Out-Null
+                }
                 $response = $searcher.SendRequest($request)
                 while ($true) {
                     $response = $searcher.SendRequest($request)
@@ -2396,16 +2409,15 @@ Function Local:Get-LdapObject {
                     }
                     $pageRequestControl.Cookie = $pageResponseControl.Cookie
                 }
-                
             }
             else {
                 $adsPath = "LDAP://$Server/$SearchBase"
                 if ($Credential.UserName) {
-                    $domainObject = New-Object DirectoryServices.DirectoryEntry($adsPath, $Credential.UserName, $Credential.GetNetworkCredential().Password)
-                    $searcher = New-Object DirectoryServices.DirectorySearcher($domainObject)
+                    $domainObject = New-Object -TypeName DirectoryServices.DirectoryEntry($adsPath, $Credential.UserName, $Credential.GetNetworkCredential().Password)
+                    $searcher = New-Object -TypeName DirectoryServices.DirectorySearcher($domainObject)
                 }
                 else {
-                    $searcher = New-Object DirectoryServices.DirectorySearcher([ADSI]$adsPath)
+                    $searcher = New-Object -TypeName DirectoryServices.DirectorySearcher([ADSI]$adsPath)
                 }
                 $searcher.SearchScope = $SearchScope
                 $searcher.PageSize = $PageSize
@@ -2413,6 +2425,9 @@ Function Local:Get-LdapObject {
                 $searcher.filter = $Filter
                 $propertiesToLoad = $Properties | ForEach-Object {$_.Split(',')}
                 $searcher.PropertiesToLoad.AddRange($propertiesToLoad) | Out-Null
+                if ($SecurityMasks) {
+                    $searcher.SecurityMasks = $SecurityMasks
+                }
                 $results = $searcher.FindAll()
             }
         }
@@ -2421,44 +2436,49 @@ Function Local:Get-LdapObject {
             continue
         }
 
-        $results | Where-Object {$_} | ForEach-Object {
-            if (Get-Member -InputObject $_ -name "Attributes" -Membertype Properties) {
-                # Convert DirectoryAttribute object (LDAPS results)
-                $p = @{}
-                foreach ($a in $_.Attributes.Keys | Sort-Object) {
-                    if (($a -eq 'objectsid') -or ($a -eq 'sidhistory') -or ($a -eq 'objectguid') -or ($a -eq 'securityidentifier') -or ($a -eq 'msds-allowedtoactonbehalfofotheridentity') -or ($a -eq 'usercertificate') -or ($a -eq 'ntsecuritydescriptor') -or ($a -eq 'logonhours')) {
-                        $p[$a] = $_.Attributes[$a]
-                    }
-                    elseif ($a -eq 'dnsrecord') {
-                        $p[$a] = ($_.Attributes[$a].GetValues([byte[]]))[0]
-                    }
-                    elseif (($a -eq 'whencreated') -or ($a -eq 'whenchanged')) {
-                        $value = ($_.Attributes[$a].GetValues([byte[]]))[0]
-                        $format = "yyyyMMddHHmmss.fZ"
-                        $p[$a] = [datetime]::ParseExact([Text.Encoding]::UTF8.GetString($value), $format, [cultureinfo]::InvariantCulture)
-                    }
-                    else {
-                        $values = @()
-                        foreach ($v in $_.Attributes[$a].GetValues([byte[]])) {
-                            $values += [Text.Encoding]::UTF8.GetString($v)
+        if ($Raw) {
+            $results
+        }
+        else {
+            $results | Where-Object {$_} | ForEach-Object {
+                if (Get-Member -InputObject $_ -name "Attributes" -Membertype Properties) {
+                    # Convert DirectoryAttribute object (LDAPS results)
+                    $p = @{}
+                    foreach ($a in $_.Attributes.Keys | Sort-Object) {
+                        if (($a -eq 'objectsid') -or ($a -eq 'sidhistory') -or ($a -eq 'objectguid') -or ($a -eq 'securityidentifier') -or ($a -eq 'msds-allowedtoactonbehalfofotheridentity') -or ($a -eq 'usercertificate') -or ($a -eq 'ntsecuritydescriptor') -or ($a -eq 'logonhours')) {
+                            $p[$a] = $_.Attributes[$a]
                         }
-                        $p[$a] = $values
+                        elseif ($a -eq 'dnsrecord') {
+                            $p[$a] = ($_.Attributes[$a].GetValues([byte[]]))[0]
+                        }
+                        elseif (($a -eq 'whencreated') -or ($a -eq 'whenchanged')) {
+                            $value = ($_.Attributes[$a].GetValues([byte[]]))[0]
+                            $format = "yyyyMMddHHmmss.fZ"
+                            $p[$a] = [datetime]::ParseExact([Text.Encoding]::UTF8.GetString($value), $format, [cultureinfo]::InvariantCulture)
+                        }
+                        else {
+                            $values = @()
+                            foreach ($v in $_.Attributes[$a].GetValues([byte[]])) {
+                                $values += [Text.Encoding]::UTF8.GetString($v)
+                            }
+                            $p[$a] = $values
+                        }
                     }
                 }
-            }
-            else {
-                $p = $_.Properties
-            }
-            $objectProperties = @{}
-            $p.Keys | ForEach-Object {
-                if (($_ -ne 'adspath') -and ($p[$_].count -eq 1)) {
-                    $objectProperties[$_] = $p[$_][0]
+                else {
+                    $p = $_.Properties
                 }
-                elseif ($_ -ne 'adspath') {
-                    $objectProperties[$_] = $p[$_]
+                $objectProperties = @{}
+                $p.Keys | ForEach-Object {
+                    if (($_ -ne 'adspath') -and ($p[$_].count -eq 1)) {
+                        $objectProperties[$_] = $p[$_][0]
+                    }
+                    elseif ($_ -ne 'adspath') {
+                        $objectProperties[$_] = $p[$_]
+                    }
                 }
+                New-Object -TypeName PSObject -Property ($objectProperties)
             }
-            New-Object -TypeName PSObject -Property ($objectProperties)
         }
     }
 
@@ -2518,7 +2538,7 @@ Function Local:Get-LdapObjectAcl {
                 $SearchBase = $defaultNC
             }
         }
-        $securityMasks = @([System.DirectoryServices.SecurityMasks]::Dacl)
+        $securityMasks = @([DirectoryServices.SecurityMasks]::Dacl)
     }
 
     Process {
@@ -2526,7 +2546,7 @@ Function Local:Get-LdapObjectAcl {
             if ($SSL) {
                 $domain = $defaultNC -replace 'DC=' -replace ',','.'
                 [Reflection.Assembly]::LoadWithPartialName("System.DirectoryServices.Protocols") | Out-Null
-                $searcher = New-Object -TypeName System.DirectoryServices.Protocols.LdapConnection -ArgumentList "$($Server):636"
+                $searcher = New-Object -TypeName DirectoryServices.Protocols.LdapConnection -ArgumentList "$($Server):636"
                 $searcher.SessionOptions.SecureSocketLayer = $true
                 $searcher.SessionOptions.VerifyServerCertificate = {$true}
                 $searcher.SessionOptions.DomainName = $domain
@@ -2537,10 +2557,10 @@ Function Local:Get-LdapObjectAcl {
                 else {
                     $searcher.Bind()
                 }
-                $request = New-Object -TypeName System.DirectoryServices.Protocols.SearchRequest($SearchBase, $Filter, $SearchScope)
-                $pageRequestControl = New-Object -TypeName System.DirectoryServices.Protocols.PageResultRequestControl -ArgumentList $PageSize
+                $request = New-Object -TypeName DirectoryServices.Protocols.SearchRequest($SearchBase, $Filter, $SearchScope)
+                $pageRequestControl = New-Object -TypeName DirectoryServices.Protocols.PageResultRequestControl -ArgumentList $PageSize
                 $request.Controls.Add($pageRequestControl) | Out-Null
-                $sdFlagsControl = New-Object -TypeName System.DirectoryServices.Protocols.SecurityDescriptorFlagControl -ArgumentList $securityMasks
+                $sdFlagsControl = New-Object -TypeName DirectoryServices.Protocols.SecurityDescriptorFlagControl -ArgumentList $securityMasks
                 $request.Controls.Add($sdFlagsControl) | Out-Null
                 $response = $searcher.SendRequest($request)
                 $results = @()
@@ -2561,11 +2581,11 @@ Function Local:Get-LdapObjectAcl {
             else {
                 $adsPath = "LDAP://$Server/$SearchBase"
                 if ($Credential.UserName) {
-                    $domainObject = New-Object DirectoryServices.DirectoryEntry($adsPath, $Credential.UserName, $Credential.GetNetworkCredential().Password)
-                    $searcher = New-Object DirectoryServices.DirectorySearcher($domainObject)
+                    $domainObject = New-Object -TypeName DirectoryServices.DirectoryEntry($adsPath, $Credential.UserName, $Credential.GetNetworkCredential().Password)
+                    $searcher = New-Object -TypeName DirectoryServices.DirectorySearcher($domainObject)
                 }
                 else {
-                    $searcher = New-Object DirectoryServices.DirectorySearcher([ADSI]$adsPath)
+                    $searcher = New-Object -TypeName DirectoryServices.DirectorySearcher([ADSI]$adsPath)
                 }
                 $searcher.SearchScope = $SearchScope
                 $searcher.PageSize = $PageSize
@@ -2603,7 +2623,7 @@ Function Local:Get-LdapObjectAcl {
                 $p = $_.Properties
             }
             try {
-                New-Object Security.AccessControl.RawSecurityDescriptor -ArgumentList $p['ntsecuritydescriptor'][0], 0 | ForEach-Object { $_.DiscretionaryAcl } | ForEach-Object {
+                New-Object -TypeName Security.AccessControl.RawSecurityDescriptor -ArgumentList $p['ntsecuritydescriptor'][0], 0 | ForEach-Object { $_.DiscretionaryAcl } | ForEach-Object {
                     $_ | Add-Member NoteProperty 'ObjectDN' $p.distinguishedname[0]
                     $_ | Add-Member NoteProperty 'ActiveDirectoryRights' ([Enum]::ToObject([DirectoryServices.ActiveDirectoryRights], $_.AccessMask))
                     Write-Output $_
