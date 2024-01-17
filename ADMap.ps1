@@ -933,12 +933,11 @@ Function Get-KerberosDelegation {
 
     Process {
         $filter = '(&(!userAccountControl:1.2.840.113556.1.4.803:=2)(|(userAccountControl:1.2.840.113556.1.4.803:=524288)(userAccountControl:1.2.840.113556.1.4.803:=16777216)(msDS-AllowedToDelegateTo=*)(msDS-AllowedToActOnBehalfOfOtherIdentity=*)))'
-        $properties = 'distinguishedName','sAMAccountName','objectSid','objectCategory','userAccountControl','msDS-AllowedToActOnBehalfOfOtherIdentity','lastLogon','servicePrincipalName','operatingSystem','operatingSystemVersion','operatingSystemServicePack'
+        $properties = 'distinguishedName','sAMAccountName','objectSid','objectCategory','userAccountControl','msDS-AllowedToDelegateTo','msDS-AllowedToActOnBehalfOfOtherIdentity','lastLogon','servicePrincipalName','operatingSystem','operatingSystemVersion','operatingSystemServicePack'
         Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $defaultNC -Filter $filter -Properties $properties -Credential $Credential | ForEach-Object {
             $obj = $_
             $kerberosDelegation = $false
             $delegationTargetService = 'None'
-            $rbcdService = 'None'
 
             # Unconstrained delegation
             if ($_.userAccountControl -band 524288) {
@@ -950,7 +949,7 @@ Function Get-KerberosDelegation {
             # Constrained delegation
             elseif ($_.'msDS-AllowedToDelegateTo') {
                 $kerberosDelegation = 'Constrained'
-                if ($userAccountControl -band 16777216) {
+                if ($_.userAccountControl -band 16777216) {
                     # TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION
                     $kerberosDelegation = 'Protocol Transition'
                 }
