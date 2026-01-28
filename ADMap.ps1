@@ -1822,6 +1822,65 @@ Function Get-LegacyComputer {
     }
 }
 
+Function Get-DomainDFS {
+<#
+.SYNOPSIS
+    Enumerate Distributed File Systems (DFS) from Active Directory.
+
+    Author: Timothee MENOCHET (@_tmenochet)
+
+.DESCRIPTION
+    Get-DomainDFS queries domain controller via LDAP protocol for DFS information.
+
+.PARAMETER Server
+    Specifies the domain controller to query.
+
+.PARAMETER SSL
+    Use SSL connection to LDAP Server.
+
+.PARAMETER Credential
+    Specifies the domain account to use.
+
+.EXAMPLE
+    PS C:\> Get-DomainDFS -Server ADATUM.CORP -Credential ADATUM\testuser
+#>
+
+    [CmdletBinding()]
+    Param (
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $Server = $Env:USERDNSDOMAIN,
+
+        [Switch]
+        $SSL,
+
+        [ValidateNotNullOrEmpty()]
+        [Management.Automation.PSCredential]
+        [Management.Automation.Credential()]
+        $Credential = [Management.Automation.PSCredential]::Empty
+    )
+
+    try {
+        $rootDSE = Get-LdapRootDSE -Server $Server
+        $defaultNC = $rootDSE.defaultNamingContext[0]
+        $dfsContainer = "CN=Dfs-Configuration,CN=System,$defaultNC"
+    }
+    catch {
+        Write-Error "Domain controller unreachable" -ErrorAction Stop
+    }
+
+    Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $dfsContainer -Filter "(objectClass=fTDfs)" -Properties distinguishedName,objectClass,name,remoteServerName,whencreated -Credential $Credential
+    Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $dfsContainer -Filter '(objectClass=msDFS-NamespaceAnchor)' -Properties distinguishedName,objectClass,name,whenCreated -Credential $Credential | ForEach-Object {
+        $dfsItemMembers = Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $_.distinguishedName -Filter '(objectClass=msDFS-Namespacev2)' -Properties distinguishedName,objectClass,name -Credential $Credential
+        $dfsItemMembers | ForEach-Object {
+            $itemMemberLinks = Get-LdapObject -Server $Server -SSL:$SSL -SearchBase $_.distinguishedName -Filter '(objectClass=msDFS-Linkv2)' -Properties distinguishedName,objectClass,name,msdfs-linkpathv2 -Credential $Credential
+            $_ | Add-Member -MemberType:NoteProperty -Name 'dfsItemLinks' -Value $itemMemberLinks.'msdfs-linkpathv2'
+        }
+        $_ | Add-Member -MemberType:NoteProperty -Name 'Links' -Value $dfsItemMembers.dfsItemLinks
+        $_
+    }
+}
+
 Function Get-DomainDnsRecord {
 <#
 .SYNOPSIS

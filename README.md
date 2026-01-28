@@ -23,6 +23,7 @@ Get-ADCSServer                  -   gets ADCS Certificate Authority servers from
 Get-ADCSCertificateTemplate     -   gets ADCS certificate templates from a given Active Directory domain and check for exploitable vulnerabilities
 Get-SCCMServer                  -   gets SCCM servers from a given Active Directory domain
 Get-LegacyComputer              -   gets outdated Windows computers from a given Active Directory domain
+Get-DomainDFS                   -   gets DFS from a given Active Directory domain
 Get-DomainDnsRecord             -   gets Active Directory-Integrated DNS records for a given zone
 Get-DomainSubnet                -   gets subnets defined in a given Active Directory domain
 ```
